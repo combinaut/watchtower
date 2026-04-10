@@ -5,7 +5,7 @@ module Watchtower
 
     def self.add_trigger(observing_class, **options)
       observing_class = Helpers.constantize(observing_class)
-      triggers << build_trigger(options.merge(observing_class: observing_class))
+      triggers << build_trigger(**options.merge(observing_class: observing_class))
       reinitialize unless observed_classes.include?(observing_class)
       Rails.logger.debug { "Observing #{triggers.last.class}" }
     end
@@ -49,7 +49,7 @@ module Watchtower
     end
 
     def after_save(changed_record)
-      Watchtower::Job.perform_later(payload_for_processing(changed_record))
+      Watchtower::Job.perform_later(**payload_for_processing(changed_record))
     end
 
     private
