@@ -12,7 +12,7 @@ module Watchtower
 
     def self.build_trigger(attribute: nil, **options)
       unless options[:observing_class]
-        raise ArgumentError, 'Must specify an observing class. What class is watching for changes?'
+        raise ArgumentError, "Must specify an observing class. What class is watching for changes?"
       end
 
       # Alias `attributes` to `attribute` and ensure it is always an array
@@ -30,11 +30,11 @@ module Watchtower
         options[:class] = Helpers.constantize(options[:class])
       end
 
-      if [:class].blank?
+      if [ :class ].blank?
         raise ArgumentError, "Must specify which class is observed, e.g. class: MyClass"
       end
 
-      return Trigger.new(options).freeze
+      Trigger.new(options).freeze
     end
 
     Trigger = Struct.new(:observing_class, :callback, :association, :attributes, :class, :affects, :includes, keyword_init: true)

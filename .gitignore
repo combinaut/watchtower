@@ -9,3 +9,7 @@
 /spec/dummy/storage/
 /spec/dummy/tmp/
 .DS_Store
+
+# Claude
+.claude/settings.local.json
+.claude/worktrees/*
