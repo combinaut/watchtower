@@ -37,7 +37,14 @@ module Watchtower
       Trigger.new(options).freeze
     end
 
-    Trigger = Struct.new(:observing_class, :callback, :association, :attributes, :class, :affects, :includes, keyword_init: true)
+    Trigger = Struct.new(:observing_class, :callback, :association, :attributes, :class, :affects, :includes, :enabled, keyword_init: true) do
+      # Stable, serialisable identity for a trigger. Lets an enable/disable decision made at enqueue
+      # time (see Observer#after_save) be carried in the job payload and matched back to this trigger
+      # when the asynchronous Watchtower::Job runs (see Job#trigger_suppressed?).
+      def key
+        [ observing_class.name, callback, association ].join("/")
+      end
+    end
 
     def self.reinitialize
       observe observable_classes
@@ -48,11 +55,30 @@ module Watchtower
       triggers.pluck(:class).uniq
     end
 
+    # Evaluate each matching trigger's `enabled` predicate INLINE (here, in the saving thread, where
+    # any caller-set context — e.g. a thread-local opened around an importer — is still live), then
+    # carry the decision into the async job by recording the suppressed triggers' keys. If every
+    # matching trigger is suppressed there is nothing for the job to do, so we skip enqueuing entirely.
     def after_save(changed_record)
-      Watchtower::Job.perform_later(**payload_for_processing(changed_record))
+      triggers = triggers_for(changed_record.class)
+      suppressed = triggers.reject { |trigger| trigger_enabled?(trigger, changed_record) }
+      return if triggers.any? && suppressed.length == triggers.length
+
+      payload = payload_for_processing(changed_record)
+      payload[:suppressed_trigger_keys] = suppressed.map(&:key) if suppressed.any?
+      Watchtower::Job.perform_later(**payload)
     end
 
     private
+
+    def triggers_for(klass)
+      Watchtower::Observer.triggers.select { |trigger| klass <= trigger.class }
+    end
+
+    # A trigger with no `enabled` predicate is always enabled (existing triggers are unaffected).
+    def trigger_enabled?(trigger, changed_record)
+      trigger.enabled.nil? || Helpers.evaluate(trigger.enabled, changed_record)
+    end
 
     def payload_for_processing(changed_record)
       {
