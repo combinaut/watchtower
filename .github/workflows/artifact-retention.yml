@@ -1,0 +1,109 @@
+name: Artifact Retention
+
+on:
+  schedule:
+    - cron: "0 4 * * 0" # Every Sunday at 04:00 UTC (after ghcr-retention at 03:00)
+  workflow_dispatch:
+    inputs:
+      repos:
+        description: 'Space-separated repo names, or "all" for every repo in the org'
+        default: "sparkle hl7-message-router"
+      max_age_days:
+        description: "Delete artifacts older than this many days"
+        default: "7"
+      dry_run:
+        description: "List what would be deleted without deleting"
+        type: boolean
+        default: false
+
+# No GITHUB_TOKEN permissions needed: the ephemeral GITHUB_TOKEN is scoped to
+# this repo only and cannot delete artifacts in other repos. We use the org's
+# classic PAT from 1Password (needs the `repo` scope, i.e. actions:write on
+# every target repo) — the same OP_SERVICE_ACCOUNT_TOKEN org secret that
+# ghcr-retention.yml uses.
+permissions: {}
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Load secrets from 1Password
+        uses: 1password/load-secrets-action@v4
+        with:
+          export-env: true
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          GH_TOKEN: op://GitHub/Actions/GITHUB_TOKEN
+
+      - name: Delete artifacts older than the cutoff
+        env:
+          OWNER: ${{ github.repository_owner }}
+          REPOS: ${{ inputs.repos || 'sparkle hl7-message-router' }}
+          MAX_AGE_DAYS: ${{ inputs.max_age_days || '7' }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+
+          dry_run=false
+          [ "${DRY_RUN:-}" = "true" ] && dry_run=true
+
+          cutoff_epoch=$(( $(date -u +%s) - MAX_AGE_DAYS * 86400 ))
+          cutoff_iso=$(date -u -d "@${cutoff_epoch}" +%Y-%m-%dT%H:%M:%SZ)
+          echo "Cutoff: deleting artifacts created before ${cutoff_iso} (max age ${MAX_AGE_DAYS}d)"
+          echo "Dry run: ${dry_run}"
+
+          if [ "$REPOS" = "all" ]; then
+            mapfile -t repo_list < <(gh api "orgs/${OWNER}/repos?per_page=100" --paginate --jq '.[].name')
+          else
+            read -r -a repo_list <<< "$REPOS"
+          fi
+          echo "Sweeping ${#repo_list[@]} repo(s): ${repo_list[*]}"
+
+          total_deleted=0
+          total_bytes=0
+
+          for repo in "${repo_list[@]}"; do
+            echo "::group::${repo}"
+            # Server-side filter: only non-expired artifacts past the cutoff.
+            # Expired artifacts hold no storage and GitHub purges them on its own.
+            candidates=$(gh api "repos/${OWNER}/${repo}/actions/artifacts?per_page=100" --paginate \
+              --jq ".artifacts[] | select(.expired==false) | select(.created_at < \"${cutoff_iso}\") | [.id, .size_in_bytes, .created_at, .name] | @tsv" \
+              2>/dev/null || true)
+
+            repo_count=0
+            repo_bytes=0
+            while IFS=$'\t' read -r id size created name; do
+              [ -z "${id:-}" ] && continue
+              repo_count=$((repo_count + 1))
+              repo_bytes=$((repo_bytes + size))
+              if [ "${dry_run}" = "true" ]; then
+                echo "would delete  ${created}  $((size / 1048576))MB  ${name}"
+              else
+                if gh api -X DELETE "repos/${OWNER}/${repo}/actions/artifacts/${id}" >/dev/null 2>&1; then
+                  echo "deleted       ${created}  $((size / 1048576))MB  ${name}"
+                else
+                  echo "FAILED        ${created}  ${name} (check PAT has actions:write on ${repo})"
+                fi
+              fi
+            done <<< "${candidates}"
+
+            echo "${repo}: ${repo_count} artifact(s), $((repo_bytes / 1048576))MB"
+            total_deleted=$((total_deleted + repo_count))
+            total_bytes=$((total_bytes + repo_bytes))
+            echo "::endgroup::"
+          done
+
+          suffix=""
+          verb="removed"
+          if [ "${dry_run}" = "true" ]; then
+            suffix=" (dry run)"
+            verb="would remove"
+          fi
+          echo "Total: ${total_deleted} artifact(s), $((total_bytes / 1048576))MB${suffix}"
+          {
+            echo "### Artifact Retention"
+            echo ""
+            echo "- Cutoff: \`${cutoff_iso}\` (max age ${MAX_AGE_DAYS}d)"
+            echo "- Repos swept: ${repo_list[*]}"
+            echo "- Artifacts ${verb}: **${total_deleted}** (~$((total_bytes / 1048576))MB)"
+          } >> "$GITHUB_STEP_SUMMARY"
