@@ -24,7 +24,7 @@ module Watchtower
     def current(change)
       return Helpers.evaluate(@trigger.affects, change.record) unless reflection
 
-      observing_class.joins(reflection.name).where(reflection.klass.table_name => { reflection.klass.primary_key => change.record_id }).distinct
+      observing_class.joins(reflection.name).where(reflection.klass.table_name => { reflection.klass.primary_key => change.record_id })
     end
   end
 end

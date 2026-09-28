@@ -80,6 +80,8 @@ watches association: :books, callback: :reindex!                 # method on the
 watches association: :books, callback: ->(author) { author.reindex! }  # proc, passed the record
 ```
 
+Several triggers of an observing class that share a callback run it once per affected record, so an `Author` watching both its books' `title` and their `genre` is reindexed once when a book changes both.
+
 ## Gating triggers
 
 `enabled:` lets you switch a specific trigger off for the dynamic extent of a block — useful around bulk operations that would otherwise fire the callback for every touched row, when a single batch recompute (or a periodic full rebuild) is cheaper.

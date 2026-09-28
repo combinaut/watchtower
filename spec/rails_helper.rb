@@ -15,6 +15,7 @@ ActiveRecord::Schema.define do
   create_table :books, force: true do |t|
     t.belongs_to :author
     t.string :title
+    t.string :genre
     t.timestamps
   end
 
