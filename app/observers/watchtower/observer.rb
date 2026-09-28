@@ -35,12 +35,36 @@ module Watchtower
       end
 
       reflection = options[:observing_class].reflect_on_association(options[:association]) if options[:association]
-      watch = Watch.new(
-        klass: options[:class], reflection: reflection, observing_class: options[:observing_class], association: options[:association],
-        attributes: options[:attributes]
-      )
-      options[:watches] = [ watch.freeze ]
+      options[:watches] =
+        if reflection
+          watches_for(reflection, options[:attributes], foreign_keys_only: false)
+        else
+          watch = Watch.new(
+            klass: options[:class], observing_class: options[:observing_class], association: options[:association],
+            attributes: options[:attributes], foreign_keys_only: false
+          )
+          [ watch.freeze ]
+        end
       Trigger.new(options).freeze
+    end
+
+    # The watches for `reflection`: its own class, and for an association through another, a `foreign_keys_only`
+    # watch on the record it passes through, repeated for each level of nesting.
+    def self.watches_for(reflection, attributes, foreign_keys_only:)
+      watch = Watch.new(klass: reflection.klass, reflection: reflection, attributes: attributes, foreign_keys_only: foreign_keys_only).freeze
+      return [ watch ] unless reflection.through_reflection?
+
+      [ watch, *watches_for(reflection.through_reflection, source_foreign_key_attributes(reflection), foreign_keys_only: true) ]
+    end
+
+    # The foreign keys the record a through association passes through holds toward the association's records:
+    # `has_many :reviews, through: :books` has none, `has_many :publishers, through: :books` has the `Book`'s
+    # `publisher_id`, and a polymorphic source adds its `foreign_type`.
+    def self.source_foreign_key_attributes(reflection)
+      source = reflection.source_reflection
+      return [] unless source.belongs_to? && !source.through_reflection?
+
+      [ source.foreign_key, (source.foreign_type if source.polymorphic?) ].compact
     end
 
     Trigger = Struct.new(:observing_class, :callback, :association, :attributes, :class, :affects, :includes, :enabled, :watches, keyword_init: true) do
@@ -54,6 +78,12 @@ module Watchtower
       # The watches through which a change to a `klass` record reaches this trigger.
       def watches_on(klass)
         watches.select { |watch| klass <= watch.klass }
+      end
+
+      # Whether the trigger was built before its association was defined, so it watches only `class:` and not the
+      # records an association through another passes through.
+      def awaiting_association?
+        association.present? && watches.first[:reflection].nil?
       end
     end
 
@@ -69,8 +99,12 @@ module Watchtower
     # @!attribute association
     #   @return [Symbol, nil] the name of `reflection`
     # @!attribute attributes
-    #   @return [Array<Symbol, String>] the attributes whose change fires the trigger; empty for any change
-    Watch = Struct.new(:klass, :reflection, :observing_class, :association, :attributes, keyword_init: true) do
+    #   @return [Array<Symbol, String>] the attributes whose change fires the trigger. Empty means any change fires
+    #     it, or, with `foreign_keys_only`, only a change to `foreign_key_attributes`.
+    # @!attribute foreign_keys_only
+    #   @return [Boolean] whether only a destroy, or a change to `attributes` or `foreign_key_attributes`, fires the
+    #     trigger, as for a record an association passes through
+    Watch = Struct.new(:klass, :reflection, :observing_class, :association, :attributes, :foreign_keys_only, keyword_init: true) do
       def reflection
         self[:reflection] || (association && observing_class.reflect_on_association(association))
       end
@@ -92,7 +126,11 @@ module Watchtower
       end
     end
 
+    # Observes every class the triggers watch, first rebuilding each trigger still awaiting its association
+    # (`Trigger#awaiting_association?`), so one whose association now exists also watches the records it passes
+    # through.
     def self.reinitialize
+      self.triggers = triggers.map { |trigger| trigger.awaiting_association? ? build_trigger(**trigger.to_h.except(:watches)) : trigger }
       observe observable_classes
       instance.send(:initialize)
     end

@@ -12,5 +12,9 @@ module Watchtower
       app.config.active_record.observers ||= []
       app.config.active_record.observers << "Watchtower::Observer"
     end
+
+    initializer "watchtower.observer.watches" do |app|
+      app.config.after_initialize { Watchtower::Observer.reinitialize }
+    end
   end
 end

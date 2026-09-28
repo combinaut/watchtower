@@ -69,6 +69,16 @@ RSpec.describe "Watchtower triggers on saves, moves and destroys" do
 
         expect { review.update!(book: other_book) }.to reindexes(author, other_author)
       end
+
+      it "runs on the owners the record it passes through moves between" do
+        review
+        expect { book.update!(author: other_author) }.to reindexes(author, other_author)
+      end
+
+      it "does not run on another change to the record it passes through" do
+        review
+        expect { book.update!(title: "Renamed") }.to reindexes_nothing(author)
+      end
     end
 
     context "on an association through a record that holds the source's key" do
@@ -79,6 +89,11 @@ RSpec.describe "Watchtower triggers on saves, moves and destroys" do
       it "runs on the owners of a destroyed record" do
         book.update!(publisher: publisher)
         expect { publisher.destroy! }.to reindexes(author)
+      end
+
+      it "runs when the record it passes through changes the key" do
+        book
+        expect { book.update!(publisher: publisher) }.to reindexes(author)
       end
     end
 
@@ -104,6 +119,24 @@ RSpec.describe "Watchtower triggers on saves, moves and destroys" do
       book
 
       expect { book.destroy! }.to reindexes(author)
+    end
+
+    it "watches the record it passes through for a trigger declared before the association, once the observer reinitializes" do
+      late_author = Class.new(ApplicationRecord) do
+        self.table_name = "authors"
+
+        def reindex!
+          increment!(:reindex_count)
+        end
+      end
+      stub_const("LateAuthor", late_author)
+      LateAuthor.watches(association: :reviews, class: "Review", callback: :reindex!)
+      LateAuthor.has_many :books, foreign_key: :author_id
+      LateAuthor.has_many :reviews, through: :books
+      Watchtower::Observer.reinitialize
+      Review.create!(book: book, rating: 5)
+
+      expect { book.update!(author: other_author) }.to reindexes(author, other_author)
     end
 
     it "does not run a trigger on one subclass for a destroyed record of a sibling subclass" do

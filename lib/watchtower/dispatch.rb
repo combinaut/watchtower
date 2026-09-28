@@ -28,12 +28,12 @@ module Watchtower
     end
 
     # Whether `change` fires `watch`: a destroy, a move, or a change to a watched attribute always does, and any
-    # other change does when the watch names no attributes.
+    # other change does when the watch names no attributes and is not `foreign_keys_only`.
     def self.relevant?(watch, change)
       watched = watch.foreign_key_attributes + watch.attributes.map(&:to_s)
       return true if change.destroyed || change.changed_attributes.intersect?(watched)
 
-      watch.attributes.empty?
+      !watch.foreign_keys_only && watch.attributes.empty?
     end
   end
 end

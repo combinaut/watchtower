@@ -88,6 +88,7 @@ A record that moves to another owner, or is destroyed, leaves an owner behind th
 
 - **Moves.** A save that changes the foreign key linking the record to its owners (and, for a polymorphic association, the type) runs the callback on the owner before and the owner after. Moving a `Book` to another `Author` reindexes both.
 - **Destroys.** Destroying a record runs the callback on the owners it had.
+- **Records an association passes through.** For `has_many :reviews, through: :books`, moving or destroying a `Book` changes an author's reviews without any `Review` saving, so a trigger on `:reviews` also watches `Book`. Only a change to the `Book`'s foreign keys fires it (its `author_id`, or for `has_many :publishers, through: :books`, its `publisher_id`), not every `Book` save. A trigger declared before its association (with `class:`) starts watching the record it passes through the next time the observer reinitializes after the association exists. The observer reinitializes once the application has initialized, and whenever a new trigger watches a class it does not yet observe.
 
 The owners before the change are found from the foreign keys the change carries, not queried in the saving thread, so a save costs no more reads with a trigger than without one. The one exception is an `affects:` trigger on a destroyed record, whose scope is evaluated at the destroy, since the job can no longer load the record.
 
@@ -119,6 +120,7 @@ Callbacks run in `Watchtower::Job`, an `ActiveJob`. It uses the application's de
 
 ## Caveats
 
+- **Nested through associations.** For an association through another whose source is itself a through association, only the first record it passes through is watched, and a move of the association's own records reaches only their current owners.
 - **`affects:` on a move.** An `affects:` scope is evaluated on the record as it is when the callback runs, so it reaches only the current owners.
 - **STI.** The change payload identifies the record by `base_class`, so triggers are matched against the base class of an STI hierarchy.
 
