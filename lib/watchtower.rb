@@ -5,6 +5,9 @@ require "rails-observers"
 require "watchtower/version"
 require "watchtower/engine"
 require "watchtower/helpers"
+require "watchtower/change"
+require "watchtower/audience"
+require "watchtower/dispatch"
 require "watchtower/active_record"
 
 module Watchtower
