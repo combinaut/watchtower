@@ -1,41 +1,69 @@
 module Watchtower
-  # A save of an observed record, as the triggers it fires read it.
+  # A save or destroy of an observed record, as the triggers it fires read it. A change moves the record when it
+  # changes a foreign key that ties the record to its owners (`Observer::Watch#foreign_key_attributes`).
   #
   # @!attribute record_class
   #   @return [String] the record's base class name
+  # @!attribute record_type
+  #   @return [String] the record's own class name, which differs from `record_class` for an STI subclass
   # @!attribute record_id
   #   @return [Integer]
   # @!attribute record
-  #   @return [ActiveRecord::Base]
+  #   @return [ActiveRecord::Base, nil] the record, nil in a job once it is destroyed or gone
   # @!attribute destroyed
   #   @return [Boolean]
   # @!attribute changed_attributes
-  #   @return [Array<String>] the attributes the change saved
-  Change = Struct.new(:record_class, :record_id, :record, :destroyed, :changed_attributes, keyword_init: true) do
-    # The change `record` just saved.
-    def self.capture(record)
+  #   @return [Array<String>] the attributes the change saved; empty for a destroy
+  # @!attribute previous_foreign_keys
+  #   @return [Hash{String => Object}] the foreign key attributes' values before a change that moved or destroyed the
+  #     record; empty otherwise
+  # @!attribute previous_owner_ids
+  #   @return [Hash{String => Array}] by trigger key, the `affects:` audience of a destroyed record, which a job
+  #     cannot read once the record is gone
+  Change = Struct.new(:record_class, :record_type, :record_id, :record, :destroyed, :changed_attributes, :previous_foreign_keys, :previous_owner_ids, keyword_init: true) do
+    # The change `record` just made, for `triggers`. With `resolve_affects`, reads each `affects:` trigger's audience
+    # now (`previous_owner_ids`).
+    def self.capture(record, triggers, destroyed:, resolve_affects:)
+      keys = triggers.flat_map { |trigger| trigger.watches_on(record.class) }.flat_map(&:foreign_key_attributes).uniq
+      moved = destroyed || keys.any? { |name| record.saved_change_to_attribute?(name) }
       new(
         record_class: record.class.base_class.name,
+        record_type: record.class.name,
         record_id: record.id,
         record: record,
-        destroyed: record.destroyed?,
-        changed_attributes: record.saved_changes.keys
+        destroyed: destroyed,
+        changed_attributes: destroyed ? [] : record.saved_changes.keys,
+        previous_foreign_keys: moved ? keys.index_with { |name| destroyed ? record[name] : record.attribute_before_last_save(name) } : {},
+        previous_owner_ids: resolve_affects ? affects_ids(record, triggers) : {}
       )
     end
 
+    def self.affects_ids(record, triggers)
+      triggers.select(&:affects).to_h do |trigger|
+        [ trigger.key, Helpers.evaluate(trigger.affects, record).pluck(trigger.observing_class.primary_key) ]
+      end
+    end
+
     # The change a job reads from its payload.
-    def self.from_payload(record_class:, record_id:, destroyed:, changed_attributes:)
-      record = record_class.constantize.find(record_id)
-      new(record_class: record_class, record_id: record_id, record: record, destroyed: destroyed, changed_attributes: changed_attributes)
+    def self.from_payload(record_class:, record_id:, destroyed:, changed_attributes:, record_type: record_class, previous_foreign_keys: {}, previous_owner_ids: {})
+      record = record_class.constantize.find_by(id: record_id) unless destroyed
+      new(
+        record_class: record_class, record_type: record_type, record_id: record_id, record: record, destroyed: destroyed,
+        changed_attributes: changed_attributes, previous_foreign_keys: previous_foreign_keys, previous_owner_ids: previous_owner_ids
+      )
     end
 
     def to_payload
-      { record_class: record_class, record_id: record_id, destroyed: destroyed, changed_attributes: changed_attributes }
+      payload = { record_class: record_class, record_id: record_id, destroyed: destroyed, changed_attributes: changed_attributes }
+      payload[:record_type] = record_type if record_type != record_class
+      payload[:previous_foreign_keys] = previous_foreign_keys if previous_foreign_keys.present?
+      payload[:previous_owner_ids] = previous_owner_ids if previous_owner_ids.present?
+      payload
     end
 
-    # The watches of `trigger` that observe the changed record's base class.
+    # The watches of `trigger` that observe the changed record's class.
     def watches_of(trigger)
-      trigger.watches_on(record_class.constantize)
+      trigger.watches_on(record ? record.class : record_type.constantize)
     end
   end
 end

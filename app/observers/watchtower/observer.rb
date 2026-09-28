@@ -74,6 +74,22 @@ module Watchtower
       def reflection
         self[:reflection] || (association && observing_class.reflect_on_association(association))
       end
+
+      # The association whose `foreign_key` the watched record holds, pointing at the record the audience is found
+      # through, or nil when the watched record holds no such key.
+      def foreign_key_reflection
+        return nil unless reflection
+
+        key_reflection = reflection.through_reflection? ? reflection.source_reflection : reflection
+        key_reflection unless key_reflection.through_reflection? || key_reflection.belongs_to?
+      end
+
+      # The `foreign_key`, and for a polymorphic association the `foreign_type`, that `foreign_key_reflection` reads
+      # from the watched record.
+      def foreign_key_attributes
+        key_reflection = foreign_key_reflection
+        key_reflection ? [ key_reflection.foreign_key.to_s, key_reflection.type&.to_s ].compact : []
+      end
     end
 
     def self.reinitialize
@@ -86,21 +102,29 @@ module Watchtower
     end
 
     def after_save(changed_record)
-      triggers = triggers_for(changed_record.class)
-      enqueue(triggers, changed_record) if triggers.any?
+      observe_change(changed_record, destroyed: false)
+    end
+
+    def after_destroy(changed_record)
+      observe_change(changed_record, destroyed: true)
     end
 
     private
+
+    def observe_change(changed_record, destroyed:)
+      triggers = triggers_for(changed_record.class)
+      enqueue(triggers, changed_record, destroyed: destroyed) if triggers.any?
+    end
 
     # Evaluates each matching trigger's `enabled` predicate in the saving thread, where
     # any caller-set context — e.g. a thread-local opened around an importer — is still live, then
     # carries the decision into the job as the suppressed triggers' keys. Enqueues nothing when every
     # matching trigger is suppressed.
-    def enqueue(triggers, changed_record)
+    def enqueue(triggers, changed_record, destroyed:)
       suppressed = triggers.reject { |trigger| trigger_enabled?(trigger, changed_record) }
       return if suppressed.length == triggers.length
 
-      payload = Change.capture(changed_record).to_payload
+      payload = Change.capture(changed_record, triggers - suppressed, destroyed: destroyed, resolve_affects: destroyed).to_payload
       payload[:suppressed_trigger_keys] = suppressed.map(&:key) if suppressed.any?
       Watchtower::Job.perform_later(**payload)
     end

@@ -2,7 +2,7 @@
 
 Execute a callback on a record when a **related** record changes.
 
-Many models derive state from their associations — a search index document, a cached rollup, a denormalized column. When one of those associated records changes, the owner is stale and needs to recompute. Watchtower lets you declare that relationship once and have the recompute fire automatically, **asynchronously**, whenever a contributing record is saved.
+Many models derive state from their associations — a search index document, a cached rollup, a denormalized column. When one of those associated records changes, the owner is stale and needs to recompute. Watchtower lets you declare that relationship once and have the recompute fire automatically, **asynchronously**, whenever a contributing record is saved or destroyed.
 
 ```ruby
 class Author < ApplicationRecord
@@ -18,7 +18,7 @@ Save a `Book` and the owning `Author#reindex!` runs in a background job — no `
 ## How it works
 
 1. `watches(...)` registers a **trigger** and tells Watchtower to observe the changed class (the `Book` in the example above).
-2. When an observed record is saved, an [`ActiveRecord::Observer`](https://github.com/rails/rails-observers) hook enqueues a `Watchtower::Job` with a small payload describing the change (class, id, changed attributes).
+2. When an observed record is saved or destroyed, an [`ActiveRecord::Observer`](https://github.com/rails/rails-observers) hook enqueues a `Watchtower::Job` with a small payload describing the change (class, id, changed attributes, and the foreign keys that tied the record to its owners before a move or destroy).
 3. The job resolves the **audience** — the owning records affected by the change — and runs the callback on each.
 
 Because step 2 only does an enqueue, the saving request/transaction isn't slowed by the recompute; the work happens in the job.
@@ -71,7 +71,7 @@ Fire only when specific columns change:
 watches association: :books, attribute: :title, callback: :reindex!
 ```
 
-A trigger with no `attributes` fires on any change. Triggers always fire on destruction regardless of the watched attributes.
+A trigger with no `attributes` fires on any change. Triggers always fire on a destroy, and on a [move](#moves-and-destroys), regardless of the watched attributes.
 
 ### Callbacks
 
@@ -81,6 +81,15 @@ watches association: :books, callback: ->(author) { author.reindex! }  # proc, p
 ```
 
 Several triggers of an observing class that share a callback run it once per affected record, so an `Author` watching both its books' `title` and their `genre` is reindexed once when a book changes both.
+
+## Moves and destroys
+
+A record that moves to another owner, or is destroyed, leaves an owner behind that the association join no longer reaches. Watchtower runs the callback on that owner too:
+
+- **Moves.** A save that changes the foreign key linking the record to its owners (and, for a polymorphic association, the type) runs the callback on the owner before and the owner after. Moving a `Book` to another `Author` reindexes both.
+- **Destroys.** Destroying a record runs the callback on the owners it had.
+
+The owners before the change are found from the foreign keys the change carries, not queried in the saving thread, so a save costs no more reads with a trigger than without one. The one exception is an `affects:` trigger on a destroyed record, whose scope is evaluated at the destroy, since the job can no longer load the record.
 
 ## Gating triggers
 
@@ -97,7 +106,7 @@ Reindexing.without { importer.run }
 
 The key detail is **when** the predicate is evaluated. Callbacks run asynchronously, so a thread-local set inside the block would be long gone by the time the job runs. Watchtower instead evaluates `enabled:` **inline, in the saving thread**, and carries the decision into the job:
 
-- The observer evaluates each matching trigger's `enabled:` predicate when the record saves, and enqueues only the triggers that pass — recording any suppressed triggers' keys in the job payload. If every matching trigger is suppressed, no job is enqueued at all.
+- The observer evaluates each matching trigger's `enabled:` predicate when the record saves or is destroyed, and enqueues only the triggers that pass — recording any suppressed triggers' keys in the job payload. If every matching trigger is suppressed, no job is enqueued at all.
 - The job honors that recorded decision; it does not re-evaluate the predicate.
 
 So a trigger gated off inside a block stays off for saves made in that block, while other triggers on the same record (e.g. a different model's `watches` on the same class) are unaffected. Triggers without `enabled:` are always enabled, so existing triggers behave exactly as before.
@@ -110,7 +119,7 @@ Callbacks run in `Watchtower::Job`, an `ActiveJob`. It uses the application's de
 
 ## Caveats
 
-- **Saves only.** The observer hooks `after_save` (create/update). Hard `destroy` is not observed — a destroyed row can't be reached by the audience join anyway. Use a soft-delete that saves the record if you need destruction to fire a trigger.
+- **`affects:` on a move.** An `affects:` scope is evaluated on the record as it is when the callback runs, so it reaches only the current owners.
 - **STI.** The change payload identifies the record by `base_class`, so triggers are matched against the base class of an STI hierarchy.
 
 ## Development
@@ -121,7 +130,7 @@ bundle exec rspec  # run the test suite
 bundle exec rubocop
 ```
 
-The suite boots a dummy Rails app (`spec/dummy`) with `Author` / `Book` / `Review` models and exercises the helpers, the observer, and the job.
+The suite boots a dummy Rails app (`spec/dummy`) with `Author` / `Book` / `Review` / `Publisher` / `Comment` models and exercises the helpers, the observer, and the job.
 
 ## License
 

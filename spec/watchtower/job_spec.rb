@@ -68,7 +68,9 @@ RSpec.describe Watchtower::Job do
 
     it "runs on destruction regardless of the watched attribute" do
       Author.watches(association: :books, attribute: :title, callback: :reindex!)
-      expect { perform(book, destroyed: true, changed_attributes: []) }.to change { author.reload.reindex_count }.by(1)
+      book.destroy!
+      expect { perform(book, destroyed: true, changed_attributes: [], previous_foreign_keys: { "author_id" => author.id }) }
+        .to change { author.reload.reindex_count }.by(1)
     end
   end
 

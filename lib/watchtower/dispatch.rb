@@ -27,10 +27,13 @@ module Watchtower
       includes.any? ? audience.includes(*includes) : audience
     end
 
-    # Whether `change` fires `watch`: a destroy, or a change to a watched attribute, always does, and any change does
-    # when the watch names no attributes.
+    # Whether `change` fires `watch`: a destroy, a move, or a change to a watched attribute always does, and any
+    # other change does when the watch names no attributes.
     def self.relevant?(watch, change)
-      change.destroyed || watch.attributes.empty? || change.changed_attributes.intersect?(watch.attributes.map(&:to_s))
+      watched = watch.foreign_key_attributes + watch.attributes.map(&:to_s)
+      return true if change.destroyed || change.changed_attributes.intersect?(watched)
+
+      watch.attributes.empty?
     end
   end
 end
