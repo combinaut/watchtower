@@ -19,6 +19,7 @@ RSpec.describe "Watchtower triggers on saves, moves and destroys" do
   end
 
   RSpec::Matchers.define_negated_matcher :not_change, :change
+  RSpec::Matchers.define_negated_matcher :not_have_enqueued_job, :have_enqueued_job
 
   context "with a queued trigger" do
     around { |example| perform_enqueued_jobs { example.run } }
@@ -165,6 +166,55 @@ RSpec.describe "Watchtower triggers on saves, moves and destroys" do
       book
 
       expect { book.update!(title: "Renamed", genre: "Poetry") }.to reindexes(author)
+    end
+  end
+
+  context "with an inline trigger" do
+    before { Author.watches(association: :books, callback: :reindex!, inline: true) }
+
+    it "runs in the saving thread and queues no job" do
+      book
+      expect { book.update!(title: "Changed") }.to reindexes(author).and not_have_enqueued_job(Watchtower::Job)
+    end
+
+    it "runs on the owner of a destroyed record" do
+      book
+      expect { book.destroy! }.to reindexes(author)
+    end
+
+    it "does not run when the transaction rolls back" do
+      book
+      expect { Book.transaction { book.update!(title: "Changed") and raise ActiveRecord::Rollback } }.to reindexes_nothing(author)
+    end
+
+    it "runs once, on the owners before and after the transaction, when a record moves twice" do
+      third_author = Author.create!(name: "Barbara")
+      book
+
+      expect { Book.transaction { book.update!(author: other_author) and book.update!(author: third_author) } }
+        .to reindexes(author, third_author).and reindexes_nothing(other_author)
+    end
+
+    it "runs on what an enclosing transaction commits when a savepoint within it rolls back" do
+      book
+
+      expect do
+        Book.transaction do
+          book.update!(title: "Outer")
+          Book.transaction(requires_new: true) do
+            book.update!(title: "Inner")
+            raise ActiveRecord::Rollback
+          end
+        end
+      end.to reindexes(author)
+    end
+
+    it "does not run while its enabled predicate is false at the commit, though it was true at the save" do
+      enabled = true
+      Author.watches(association: :reviews, callback: :reindex!, inline: true, enabled: -> { enabled })
+      review = Review.create!(book: book, rating: 5)
+
+      expect { Review.transaction { review.update!(rating: 4) and enabled = false } }.to reindexes_nothing(author)
     end
   end
 end

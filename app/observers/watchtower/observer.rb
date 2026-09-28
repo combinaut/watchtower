@@ -67,7 +67,7 @@ module Watchtower
       [ source.foreign_key, (source.foreign_type if source.polymorphic?) ].compact
     end
 
-    Trigger = Struct.new(:observing_class, :callback, :association, :attributes, :class, :affects, :includes, :enabled, :watches, keyword_init: true) do
+    Trigger = Struct.new(:observing_class, :callback, :association, :attributes, :class, :affects, :includes, :enabled, :inline, :watches, keyword_init: true) do
       # Stable, serialisable identity for a trigger. Lets an enable/disable decision made at enqueue
       # time (see Observer#enqueue) be carried in the job payload and matched back to this trigger
       # when the asynchronous Watchtower::Job runs (see Job#trigger_suppressed?).
@@ -147,11 +147,40 @@ module Watchtower
       observe_change(changed_record, destroyed: true)
     end
 
+    # Runs the inline triggers enabled at the commit on the change the record committed: every save and destroy of
+    # it in the transaction, merged into one that keeps the foreign keys from before the first save, leaving out
+    # those a savepoint rolled back.
+    def after_commit(changed_record)
+      return unless changed_record.instance_variable_defined?(:@watchtower_changes)
+
+      changes = changed_record.remove_instance_variable(:@watchtower_changes)
+      change = changes.reject { |transaction, _| discarded?(transaction) }.map(&:last).reduce(:merge)
+      return unless change
+
+      triggers = triggers_for(changed_record.class).select(&:inline).select { |trigger| trigger_enabled?(trigger, changed_record) }
+      Dispatch.run(triggers, change)
+    end
+
+    # Forgets the changes the rolled-back transaction or savepoint made, keeping those of an enclosing transaction,
+    # which may still commit.
+    def after_rollback(changed_record)
+      return unless changed_record.instance_variable_defined?(:@watchtower_changes)
+
+      kept = changed_record.instance_variable_get(:@watchtower_changes).reject { |transaction, _| discarded?(transaction) }
+      if kept.empty?
+        changed_record.remove_instance_variable(:@watchtower_changes)
+      else
+        changed_record.instance_variable_set(:@watchtower_changes, kept)
+      end
+    end
+
     private
 
     def observe_change(changed_record, destroyed:)
       triggers = triggers_for(changed_record.class)
-      enqueue(triggers, changed_record, destroyed: destroyed) if triggers.any?
+      inline, queued = triggers.partition(&:inline)
+      enqueue(queued, changed_record, destroyed: destroyed) if queued.any?
+      remember_for_commit(inline, changed_record, destroyed: destroyed) if inline.any?
     end
 
     # Evaluates each matching trigger's `enabled` predicate in the saving thread, where
@@ -165,6 +194,21 @@ module Watchtower
       payload = Change.capture(changed_record, triggers - suppressed, destroyed: destroyed, resolve_affects: destroyed).to_payload
       payload[:suppressed_trigger_keys] = suppressed.map(&:key) if suppressed.any?
       Watchtower::Job.perform_later(**payload)
+    end
+
+    # Stores the change on the record for `after_commit`, beside the transaction or savepoint that made it, so a
+    # savepoint that rolls back takes only its own changes with it. They are kept on the record because an
+    # `after_commit` is given only the record.
+    def remember_for_commit(triggers, changed_record, destroyed:)
+      change = Change.capture(changed_record, triggers, destroyed: destroyed, resolve_affects: false)
+      changes = changed_record.instance_variable_defined?(:@watchtower_changes) ? changed_record.instance_variable_get(:@watchtower_changes) : []
+      changed_record.instance_variable_set(:@watchtower_changes, changes + [ [ changed_record.class.connection.current_transaction, change ] ])
+    end
+
+    # Whether `transaction` rolled back, on its own or with a transaction enclosing it, or was invalidated by a
+    # connection failure at commit.
+    def discarded?(transaction)
+      transaction.state.rolledback? || transaction.state.invalidated?
     end
 
     def triggers_for(klass)

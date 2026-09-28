@@ -13,7 +13,7 @@ module Watchtower
   # @!attribute destroyed
   #   @return [Boolean]
   # @!attribute changed_attributes
-  #   @return [Array<String>] the attributes the change saved; empty for a destroy
+  #   @return [Array<String>] the attributes the change saved; empty for a destroy, unless it was merged with an earlier save (`#merge`)
   # @!attribute previous_foreign_keys
   #   @return [Hash{String => Object}] the foreign key attributes' values before a change that moved or destroyed the
   #     record; empty otherwise
@@ -59,6 +59,20 @@ module Watchtower
       payload[:previous_foreign_keys] = previous_foreign_keys if previous_foreign_keys.present?
       payload[:previous_owner_ids] = previous_owner_ids if previous_owner_ids.present?
       payload
+    end
+
+    # This change followed by `later`, as one change: the previous foreign keys are those before this change.
+    def merge(later)
+      self.class.new(
+        record_class: record_class,
+        record_type: record_type,
+        record_id: record_id,
+        record: later.record,
+        destroyed: destroyed || later.destroyed,
+        changed_attributes: changed_attributes | later.changed_attributes,
+        previous_foreign_keys: later.previous_foreign_keys.merge(previous_foreign_keys),
+        previous_owner_ids: previous_owner_ids.merge(later.previous_owner_ids)
+      )
     end
 
     # The watches of `trigger` that observe the changed record's class.
