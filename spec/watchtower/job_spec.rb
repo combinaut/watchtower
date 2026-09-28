@@ -35,6 +35,21 @@ RSpec.describe Watchtower::Job do
     end
   end
 
+  it "runs a trigger declared before the association it names" do
+    late_author = Class.new(ApplicationRecord) do
+      self.table_name = "authors"
+
+      def reindex!
+        increment!(:reindex_count)
+      end
+    end
+    stub_const("LateAuthor", late_author)
+    LateAuthor.watches(association: :books, class: "Book", callback: :reindex!)
+    LateAuthor.has_many :books, foreign_key: :author_id
+
+    expect { perform(book) }.to change { author.reload.reindex_count }.by(1)
+  end
+
   describe "relevance" do
     it "runs when the trigger watches no specific attributes" do
       Author.watches(association: :books, callback: :reindex!)
@@ -53,7 +68,9 @@ RSpec.describe Watchtower::Job do
 
     it "runs on destruction regardless of the watched attribute" do
       Author.watches(association: :books, attribute: :title, callback: :reindex!)
-      expect { perform(book, destroyed: true, changed_attributes: []) }.to change { author.reload.reindex_count }.by(1)
+      book.destroy!
+      expect { perform(book, destroyed: true, changed_attributes: [], previous_foreign_keys: { "author_id" => author.id }) }
+        .to change { author.reload.reindex_count }.by(1)
     end
   end
 

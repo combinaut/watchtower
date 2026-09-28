@@ -3,7 +3,7 @@ require_relative "dummy/config/environment"
 abort("The Rails environment is running in production mode!") if Rails.env.production?
 require "rspec/rails"
 
-# In-memory schema for the dummy models the specs exercise (Author has_many Books has_many Reviews).
+# In-memory schema for the dummy models the specs exercise (Authors, their Books, the Books' Publishers and Reviews, and Comments on Authors or Books).
 ActiveRecord::Schema.verbose = false
 ActiveRecord::Schema.define do
   create_table :authors, force: true do |t|
@@ -12,15 +12,35 @@ ActiveRecord::Schema.define do
     t.timestamps
   end
 
+  create_table :publishers, force: true do |t|
+    t.string :name
+    t.timestamps
+  end
+
   create_table :books, force: true do |t|
     t.belongs_to :author
+    t.belongs_to :publisher
     t.string :title
+    t.string :genre
+    t.string :type
     t.timestamps
   end
 
   create_table :reviews, force: true do |t|
     t.belongs_to :book
     t.integer :rating
+    t.timestamps
+  end
+
+  create_table :mentions, force: true do |t|
+    t.belongs_to :author
+    t.references :subject, polymorphic: true
+    t.timestamps
+  end
+
+  create_table :comments, force: true do |t|
+    t.references :commentable, polymorphic: true
+    t.string :body
     t.timestamps
   end
 end
