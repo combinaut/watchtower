@@ -67,7 +67,7 @@ module Watchtower
       [ source.foreign_key, (source.foreign_type if source.polymorphic?) ].compact
     end
 
-    Trigger = Struct.new(:observing_class, :callback, :association, :attributes, :class, :affects, :includes, :enabled, :inline, :watches, keyword_init: true) do
+    Trigger = Struct.new(:observing_class, :callback, :association, :attributes, :class, :affects, :includes, :enabled, :inline, :around, :watches, keyword_init: true) do
       # Stable, serialisable identity for a trigger. Lets an enable/disable decision made at enqueue
       # time (see Observer#enqueue) be carried in the job payload and matched back to this trigger
       # when the asynchronous Watchtower::Job runs (see Job#trigger_suppressed?).

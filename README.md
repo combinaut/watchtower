@@ -45,6 +45,7 @@ The engine includes the DSL into `ActiveRecord::Base` and registers the observer
 | `includes:` | Associations to eager-load on the audience before running the callback (avoids N+1 in the callback). |
 | `enabled:` | A predicate gating the trigger — see [Gating triggers](#gating-triggers). Defaults to always-enabled. |
 | `inline:` | Run the callback in the saving thread once the change commits, instead of in a job — see [Running inline](#running-inline). Defaults to `false`. |
+| `around:` | A block the callbacks of a change run inside — see [Wrapping the callbacks](#wrapping-the-callbacks). |
 
 ### Audience: `association:` vs `affects:`
 
@@ -98,10 +99,33 @@ For a queued trigger, the owners before the change are found from the foreign ke
 `inline: true` runs the callback in the saving thread, after the change commits, rather than in a job. Use it when the callback depends on context the saving thread holds — a batch being collected, a thread-local mode — or needs to write immediately. A transaction that rolls back runs nothing, and a savepoint that rolls back (`requires_new: true`) drops only its own changes. A record saved several times in one transaction runs the callback once, on the owners it had before the transaction and those it has after.
 
 ```ruby
-watches association: :books, callback: :refresh_row, inline: true
+watches association: :books, callback: :reindex!, inline: true
 ```
 
 An inline trigger's `enabled:` is evaluated at the commit.
+
+## Wrapping the callbacks
+
+`around:` wraps the loop that runs the callback. When a change fires the trigger, Watchtower finds every record the change affects and calls the callback on each. `around:` is a `Proc` called once for the change, with a block that runs that whole loop. A queued trigger runs it inside the change's `Watchtower::Job`, and an inline one in the saving thread after the commit. It is never called per record.
+
+That makes it the place to batch what the callbacks do. Here the search index collects the reindexing of every author a change affects, and sends it in one request:
+
+```ruby
+watches association: :books,
+        callback: :reindex!,
+        around: ->(&reindexing) { SearchIndex.batch(&reindexing) }
+```
+
+When Book 7 moves from Ada to Grace, the change runs:
+
+```ruby
+SearchIndex.batch do   # around:, once for the change
+  ada.reindex!         # the callback, once per affected author
+  grace.reindex!
+end                    # SearchIndex.batch sends both here
+```
+
+A block inside the callback would instead open and send a batch for every record. Triggers that share an observing class, a callback and an `around:` run the callback once per record inside that one block. Triggers whose `around:` differs run inside their own.
 
 ## Gating triggers
 

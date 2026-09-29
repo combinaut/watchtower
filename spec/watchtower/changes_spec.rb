@@ -169,6 +169,52 @@ RSpec.describe "Watchtower triggers on saves, moves and destroys" do
     end
   end
 
+  context "with an around block" do
+    around { |example| perform_enqueued_jobs { example.run } }
+
+    let(:calls) { [] }
+
+    def wrapping(calls, name)
+      lambda do |&run|
+        calls << :"#{name}_before"
+        run.call
+        calls << :"#{name}_after"
+      end
+    end
+
+    it "runs every callback of the change inside the block, once" do
+      Author.watches(association: :books, callback: ->(_author) { calls << :callback }, around: wrapping(calls, :batch))
+      book
+
+      calls.clear
+      book.update!(author: other_author)
+
+      expect(calls).to eq(%i[batch_before callback callback batch_after])
+    end
+
+    it "runs an inline trigger's callbacks inside the block" do
+      Author.watches(association: :books, callback: ->(_author) { calls << :callback }, inline: true, around: wrapping(calls, :batch))
+      book
+
+      calls.clear
+      book.update!(title: "Renamed")
+
+      expect(calls).to eq(%i[batch_before callback batch_after])
+    end
+
+    it "runs triggers that share a callback but not a block inside each of their blocks" do
+      callback = ->(_author) { calls << :callback }
+      Author.watches(association: :books, callback: callback, around: wrapping(calls, :first))
+      Author.watches(association: :books, attribute: :title, callback: callback, around: wrapping(calls, :second))
+      book
+
+      calls.clear
+      book.update!(title: "Renamed")
+
+      expect(calls).to eq(%i[first_before callback first_after second_before callback second_after])
+    end
+  end
+
   context "with an inline trigger" do
     before { Author.watches(association: :books, callback: :reindex!, inline: true) }
 
