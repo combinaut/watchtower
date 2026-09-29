@@ -70,9 +70,26 @@ module Watchtower
     Trigger = Struct.new(:observing_class, :callback, :association, :attributes, :class, :affects, :includes, :enabled, :inline, :around, :watches, keyword_init: true) do
       # Stable, serialisable identity for a trigger. Lets an enable/disable decision made at enqueue
       # time (see Observer#enqueue) be carried in the job payload and matched back to this trigger
-      # when the asynchronous Watchtower::Job runs (see Job#trigger_suppressed?).
+      # when the asynchronous Watchtower::Job runs (see Job#trigger_suppressed?). Two triggers on the
+      # same association with the same callback keep distinct keys when their attributes, `enabled:`
+      # or `around:` differ, and a `Proc` is named by where it is defined, which every process that
+      # loaded the code agrees on: `"Author/reindex!/books/title/enabled:app/models/author.rb:12"`.
       def key
-        [ observing_class.name, callback, association ].join("/")
+        distinctions = [
+          attributes.presence&.join(","),
+          (enabled && "enabled:#{Trigger.identity(enabled)}"),
+          (around && "around:#{Trigger.identity(around)}")
+        ]
+        [ observing_class.name, Trigger.identity(callback), association, *distinctions.compact ].join("/")
+      end
+
+      # A `Proc` by the file, relative to the application's root, and line it is defined on; anything else by its
+      # string.
+      def self.identity(value)
+        return value.to_s unless value.is_a?(Proc)
+
+        file, line = value.source_location
+        "#{file.delete_prefix("#{Rails.root}/")}:#{line}"
       end
 
       # The watches through which a change to a `klass` record reaches this trigger.

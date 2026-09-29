@@ -160,6 +160,14 @@ RSpec.describe "Watchtower triggers on saves, moves and destroys" do
       end
     end
 
+    it "runs an enabled trigger that shares its association and callback with a disabled one" do
+      Author.watches(association: :books, callback: :reindex!, around: ->(&callbacks) { callbacks.call }, enabled: -> { false })
+      Author.watches(association: :books, callback: :reindex!, around: ->(&callbacks) { callbacks.call })
+      book
+
+      expect { book.update!(title: "Renamed") }.to reindexes(author)
+    end
+
     it "runs a callback once per owner when several triggers reach it" do
       Author.watches(association: :books, attribute: :title, callback: :reindex!)
       Author.watches(association: :books, attribute: :genre, callback: :reindex!)
