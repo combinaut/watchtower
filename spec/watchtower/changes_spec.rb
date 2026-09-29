@@ -160,12 +160,66 @@ RSpec.describe "Watchtower triggers on saves, moves and destroys" do
       end
     end
 
+    it "runs an enabled trigger that shares its association and callback with a disabled one" do
+      Author.watches(association: :books, callback: :reindex!, around: ->(&callbacks) { callbacks.call }, enabled: -> { false })
+      Author.watches(association: :books, callback: :reindex!, around: ->(&callbacks) { callbacks.call })
+      book
+
+      expect { book.update!(title: "Renamed") }.to reindexes(author)
+    end
+
     it "runs a callback once per owner when several triggers reach it" do
       Author.watches(association: :books, attribute: :title, callback: :reindex!)
       Author.watches(association: :books, attribute: :genre, callback: :reindex!)
       book
 
       expect { book.update!(title: "Renamed", genre: "Poetry") }.to reindexes(author)
+    end
+  end
+
+  context "with an around block" do
+    around { |example| perform_enqueued_jobs { example.run } }
+
+    let(:calls) { [] }
+
+    def wrapping(calls, name)
+      lambda do |&run|
+        calls << :"#{name}_before"
+        run.call
+        calls << :"#{name}_after"
+      end
+    end
+
+    it "runs every callback of the change inside the block, once" do
+      Author.watches(association: :books, callback: ->(_author) { calls << :callback }, around: wrapping(calls, :batch))
+      book
+
+      calls.clear
+      book.update!(author: other_author)
+
+      expect(calls).to eq(%i[batch_before callback callback batch_after])
+    end
+
+    it "runs an inline trigger's callbacks inside the block" do
+      Author.watches(association: :books, callback: ->(_author) { calls << :callback }, inline: true, around: wrapping(calls, :batch))
+      book
+
+      calls.clear
+      book.update!(title: "Renamed")
+
+      expect(calls).to eq(%i[batch_before callback batch_after])
+    end
+
+    it "runs triggers that share a callback but not a block inside each of their blocks" do
+      callback = ->(_author) { calls << :callback }
+      Author.watches(association: :books, callback: callback, around: wrapping(calls, :first))
+      Author.watches(association: :books, attribute: :title, callback: callback, around: wrapping(calls, :second))
+      book
+
+      calls.clear
+      book.update!(title: "Renamed")
+
+      expect(calls).to eq(%i[first_before callback first_after second_before callback second_after])
     end
   end
 

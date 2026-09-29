@@ -43,6 +43,24 @@ RSpec.describe Watchtower::Observer do
         trigger = described_class.new(observing_class: Author, callback: :reindex!, association: :books)
         expect(trigger.key).to eq("Author/reindex!/books")
       end
+
+      it "keeps triggers on one association with one callback apart by their attributes, enabled and around" do
+        plain = described_class.new(observing_class: Author, callback: :reindex!, association: :books)
+        keys = [
+          plain,
+          plain.dup.tap { |trigger| trigger.attributes = [ :title ] },
+          plain.dup.tap { |trigger| trigger.enabled = -> { false } },
+          plain.dup.tap { |trigger| trigger.around = ->(&block) { block.call } }
+        ].map(&:key)
+
+        expect(keys.uniq.size).to eq(4)
+      end
+
+      it "names a Proc by where it is defined rather than by its address" do
+        trigger = described_class.new(observing_class: Author, callback: ->(author) { author.reindex! }, association: :books)
+
+        expect(trigger.key).to match(%r{\AAuthor/\S*spec/watchtower/observer_spec\.rb:\d+/books\z})
+      end
     end
   end
 
@@ -91,7 +109,7 @@ RSpec.describe Watchtower::Observer do
 
         expect { book.update!(title: "Changed") }
           .to have_enqueued_job(Watchtower::Job)
-          .with(hash_including(suppressed_trigger_keys: [ "Author/reindex!/books" ]))
+          .with(hash_including(suppressed_trigger_keys: [ a_string_starting_with("Author/reindex!/books/enabled:") ]))
       end
     end
   end

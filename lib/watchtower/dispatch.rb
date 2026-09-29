@@ -2,16 +2,22 @@ module Watchtower
   # Used to run triggers on a change.
   module Dispatch
     # Runs each of `triggers` that `change` is relevant to on every record of its audience. Triggers sharing an
-    # observing class and a callback run it once per record.
+    # observing class, a callback and an `around:` run the callback once per record, all of it inside that
+    # `around:` when they declare one.
     def self.run(triggers, change)
-      triggers.group_by { |trigger| [ trigger.observing_class, trigger.callback ] }.each do |(observing_class, callback), group|
+      triggers.group_by { |trigger| [ trigger.observing_class, trigger.callback, trigger.around ] }.each do |(observing_class, callback, around), group|
         audience = audience(observing_class, group, change)
         next unless audience
 
-        audience.find_each do |observing_record|
-          Helpers.evaluate(callback, observing_record)
-          Rails.logger.debug { "Executed Watchtower callback for #{observing_record.class} #{observing_record.id}: #{callback}" }
-        end
+        run_callbacks = -> { run_callback(callback, audience) }
+        around ? around.call(&run_callbacks) : run_callbacks.call
+      end
+    end
+
+    def self.run_callback(callback, audience)
+      audience.find_each do |observing_record|
+        Helpers.evaluate(callback, observing_record)
+        Rails.logger.debug { "Executed Watchtower callback for #{observing_record.class} #{observing_record.id}: #{callback}" }
       end
     end
 
