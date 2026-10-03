@@ -36,8 +36,29 @@ RSpec.describe Watchtower::Observer do
     end
 
     it "raises for an at: it cannot fire at" do
-      expect { described_class.build_trigger(observing_class: Author, association: :books, callback: :reindex!, at: :before_save) }
-        .to raise_error(ArgumentError, /at: must be one of \[:commit, :save\]/)
+      [ :before_save, 1, false ].each do |at|
+        expect { described_class.build_trigger(observing_class: Author, association: :books, callback: :reindex!, at: at) }
+          .to raise_error(ArgumentError, /at: must be one of \[:commit, :save\]/), "at: #{at.inspect}"
+      end
+    end
+
+    context "while Active Job enqueues Watchtower::Job after the transaction commits" do
+      around do |example|
+        Watchtower::Job.enqueue_after_transaction_commit = true
+        example.run
+      ensure
+        Watchtower::Job.enqueue_after_transaction_commit = false
+      end
+
+      it "raises for a queued trigger that fires at the save, whose job would wait for the commit" do
+        expect { described_class.build_trigger(observing_class: Author, association: :books, callback: :reindex!, at: :save) }
+          .to raise_error(ArgumentError, /enqueue_after_transaction_commit/)
+      end
+
+      it "accepts an inline trigger that fires at the save, which enqueues nothing" do
+        expect { described_class.build_trigger(observing_class: Author, association: :books, callback: :reindex!, at: :save, inline: true) }
+          .not_to raise_error
+      end
     end
 
     it "retains an enabled predicate" do
@@ -150,6 +171,23 @@ RSpec.describe Watchtower::Observer do
       end.not_to have_enqueued_job(Watchtower::Job)
     end
 
+    it "enqueues one job carrying every change to a row saved through two instances of it in one transaction" do
+      Author.watches(association: :books, callback: :reindex!)
+      other = Author.create!(name: "Grace")
+      first = Book.find(book.id)
+      second = Book.find(book.id)
+      clear_enqueued_jobs
+
+      Book.transaction do
+        first.update!(title: "Changed")
+        second.update!(author: other)
+      end
+
+      jobs = enqueued_jobs.select { |job| job["job_class"] == "Watchtower::Job" }.map { |job| ActiveJob::Arguments.deserialize(job["arguments"]).first }
+      expect(jobs.size).to eq(1)
+      expect(jobs.first).to include(changed_attributes: a_collection_including("title", "author_id"), previous_foreign_keys: { "author_id" => author.id })
+    end
+
     it "enqueues one job for a record saved several times in one transaction, with the foreign keys from before the first save" do
       Author.watches(association: :books, callback: :reindex!)
       other = Author.create!(name: "Grace")
@@ -202,6 +240,17 @@ RSpec.describe Watchtower::Observer do
       end
 
       expect(author.reload.reindex_count).to eq(0)
+    end
+
+    it "leaves the change a commit-time trigger fires on intact when a save-time predicate reloads the record" do
+      Author.watches(association: :books, callback: :touch, inline: true, at: :save, enabled: ->(changed) { changed.reload && false })
+      Author.watches(association: :books, callback: :reindex!)
+      other = Author.create!(name: "Grace")
+      clear_enqueued_jobs
+
+      book.update!(author: other)
+
+      expect(Watchtower::Job).to have_been_enqueued.with(hash_including(previous_foreign_keys: { "author_id" => author.id }))
     end
 
     it "enqueues a job apart from a trigger that fires at the commit, each suppressing the other" do
