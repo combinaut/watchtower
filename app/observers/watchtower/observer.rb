@@ -34,6 +34,9 @@ module Watchtower
         raise ArgumentError, "Must specify which class is observed, e.g. class: MyClass"
       end
 
+      options[:at] = (options[:at] || :commit).to_sym
+      raise ArgumentError, "at: must be one of #{FIRING_POINTS.inspect}, got #{options[:at].inspect}" unless FIRING_POINTS.include?(options[:at])
+
       reflection = options[:observing_class].reflect_on_association(options[:association]) if options[:association]
       options[:watches] =
         if reflection
@@ -67,18 +70,24 @@ module Watchtower
       [ source.foreign_key, (source.foreign_type if source.polymorphic?) ].compact
     end
 
-    Trigger = Struct.new(:observing_class, :callback, :association, :attributes, :class, :affects, :includes, :enabled, :inline, :around, :watches, keyword_init: true) do
+    # FIRING_POINTS are the moments a trigger can fire, its `at:`:
+    #   - commit:  when the transaction that made the change commits, once for every change it made to the record
+    #   - save:    as the record is saved or destroyed, inside its transaction, once per save
+    FIRING_POINTS = %i[commit save].freeze
+
+    Trigger = Struct.new(:observing_class, :callback, :association, :attributes, :class, :affects, :includes, :enabled, :inline, :around, :at, :watches, keyword_init: true) do
       # Stable, serialisable identity for a trigger. Lets an enable/disable decision made at enqueue
       # time (see Observer#enqueue) be carried in the job payload and matched back to this trigger
       # when the asynchronous Watchtower::Job runs (see Job#trigger_suppressed?). Two triggers on the
-      # same association with the same callback keep distinct keys when their attributes, `enabled:`
-      # or `around:` differ, and a `Proc` is named by where it is defined, which every process that
+      # same association with the same callback keep distinct keys when their attributes, `enabled:`,
+      # `around:` or `at:` differ, and a `Proc` is named by where it is defined, which every process that
       # loaded the code agrees on: `"Author/reindex!/books/title/enabled:app/models/author.rb:12"`.
       def key
         distinctions = [
           attributes.presence&.join(","),
           (enabled && "enabled:#{Trigger.identity(enabled)}"),
-          (around && "around:#{Trigger.identity(around)}")
+          (around && "around:#{Trigger.identity(around)}"),
+          ("at:save" if at == :save)
         ]
         [ observing_class.name, Trigger.identity(callback), association, *distinctions.compact ].join("/")
       end
@@ -164,9 +173,9 @@ module Watchtower
       observe_change(changed_record, destroyed: true)
     end
 
-    # Runs the inline triggers enabled at the commit on the change the record committed: every save and destroy of
-    # it in the transaction, merged into one that keeps the foreign keys from before the first save, leaving out
-    # those a savepoint rolled back.
+    # Fires the `at: :commit` triggers on the change the record committed: every save and destroy of it in the
+    # transaction, merged into one that keeps the foreign keys from before the first save, leaving out those a
+    # savepoint rolled back.
     def after_commit(changed_record)
       return unless changed_record.instance_variable_defined?(:@watchtower_changes)
 
@@ -174,8 +183,7 @@ module Watchtower
       change = changes.reject { |transaction, _| discarded?(transaction) }.map(&:last).reduce(:merge)
       return unless change
 
-      triggers = triggers_for(changed_record.class).select(&:inline).select { |trigger| trigger_enabled?(trigger, changed_record) }
-      Dispatch.run(triggers, change)
+      fire(triggers_for(changed_record.class), :commit, changed_record, change)
     end
 
     # Forgets the changes the rolled-back transaction or savepoint made, keeping those of an enclosing transaction,
@@ -193,31 +201,46 @@ module Watchtower
 
     private
 
+    # Fires the `at: :save` triggers on the change now, and records it for the `at: :commit` ones.
     def observe_change(changed_record, destroyed:)
       triggers = triggers_for(changed_record.class)
-      inline, queued = triggers.partition(&:inline)
-      enqueue(queued, changed_record, destroyed: destroyed) if queued.any?
-      remember_for_commit(inline, changed_record, destroyed: destroyed) if inline.any?
+      return if triggers.empty?
+
+      if triggers.any? { |trigger| trigger.at == :save }
+        fire(triggers, :save, changed_record, Change.capture(changed_record, triggers, destroyed: destroyed, resolve_affects: destroyed))
+      end
+      remember_for_commit(triggers, changed_record, destroyed: destroyed) if triggers.any? { |trigger| trigger.at == :commit }
     end
 
-    # Evaluates each matching trigger's `enabled` predicate in the saving thread, where
-    # any caller-set context — e.g. a thread-local opened around an importer — is still live, then
-    # carries the decision into the job as the suppressed triggers' keys. Enqueues nothing when every
-    # matching trigger is suppressed.
-    def enqueue(triggers, changed_record, destroyed:)
-      suppressed = triggers.reject { |trigger| trigger_enabled?(trigger, changed_record) }
-      return if suppressed.length == triggers.length
+    # Fires `change` for the `triggers` that fire `at`, in this thread, reading each one's `enabled` predicate now,
+    # while any caller-set context, such as a thread-local opened around an importer, is still live. The enabled
+    # inline triggers run here, and the enabled queued ones run in one `Watchtower::Job`.
+    def fire(triggers, at, changed_record, change)
+      inline, queued = triggers.partition(&:inline)
+      Dispatch.run(inline.select { |trigger| trigger.at == at && trigger_enabled?(trigger, changed_record) }, change)
+      enqueue(queued, at, changed_record, change)
+    end
 
-      payload = Change.capture(changed_record, triggers - suppressed, destroyed: destroyed, resolve_affects: destroyed).to_payload
+    # Queues `change` for the `queued` triggers that fire `at` and are enabled. The job runs every queued trigger the
+    # change reaches except those whose keys it carries as suppressed, so it carries every other trigger's key: the
+    # disabled ones, and those that fire at the other point, which get their own job. Enqueues nothing when no
+    # trigger is left.
+    def enqueue(queued, at, changed_record, change)
+      enabled = queued.select { |trigger| trigger.at == at && trigger_enabled?(trigger, changed_record) }
+      return if enabled.empty?
+
+      suppressed = queued - enabled
+      payload = change.to_payload
       payload[:suppressed_trigger_keys] = suppressed.map(&:key) if suppressed.any?
       Watchtower::Job.perform_later(**payload)
     end
 
     # Stores the change on the record for `after_commit`, beside the transaction or savepoint that made it, so a
     # savepoint that rolls back takes only its own changes with it. They are kept on the record because an
-    # `after_commit` is given only the record.
+    # `after_commit` is given only the record. A destroy reads its `affects:` audience now, while the record's
+    # associations can still be read.
     def remember_for_commit(triggers, changed_record, destroyed:)
-      change = Change.capture(changed_record, triggers, destroyed: destroyed, resolve_affects: false)
+      change = Change.capture(changed_record, triggers, destroyed: destroyed, resolve_affects: destroyed)
       changes = changed_record.instance_variable_defined?(:@watchtower_changes) ? changed_record.instance_variable_get(:@watchtower_changes) : []
       changed_record.instance_variable_set(:@watchtower_changes, changes + [ [ changed_record.class.connection.current_transaction, change ] ])
     end

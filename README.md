@@ -18,7 +18,7 @@ Save a `Book` and the owning `Author#reindex!` runs in a background job — no `
 ## How it works
 
 1. `watches(...)` registers a **trigger** and tells Watchtower to observe the changed class (the `Book` in the example above).
-2. When an observed record is saved or destroyed, an [`ActiveRecord::Observer`](https://github.com/rails/rails-observers) hook enqueues a `Watchtower::Job` with a small payload describing the change (class, id, changed attributes, and the foreign keys that tied the record to its owners before a move or destroy).
+2. When an observed record is saved or destroyed, an [`ActiveRecord::Observer`](https://github.com/rails/rails-observers) hook records the change (class, id, changed attributes, and the foreign keys that tied the record to its owners before a move or destroy). When the transaction commits, it enqueues one `Watchtower::Job` carrying the change. A transaction that rolls back enqueues nothing, and a record saved several times in one transaction enqueues one job.
 3. The job resolves the **audience** — the owning records affected by the change — and runs the callback on each.
 
 Because step 2 only does an enqueue, the saving request/transaction isn't slowed by the recompute; the work happens in the job. An [inline trigger](#running-inline) runs the callback after the commit instead.
@@ -44,8 +44,9 @@ The engine includes the DSL into `ActiveRecord::Base` and registers the observer
 | `attribute:` / `attributes:` | Only fire when one of these attributes changed. Omit to fire on any change. |
 | `includes:` | Associations to eager-load on the audience before running the callback (avoids N+1 in the callback). |
 | `enabled:` | A predicate gating the trigger — see [Gating triggers](#gating-triggers). Defaults to always-enabled. |
-| `inline:` | Run the callback in the saving thread once the change commits, instead of in a job — see [Running inline](#running-inline). Defaults to `false`. |
+| `inline:` | Run the callback in the saving thread instead of in a job — see [Running inline](#running-inline). Defaults to `false`. |
 | `around:` | A block the callbacks of a change run inside — see [Wrapping the callbacks](#wrapping-the-callbacks). |
+| `at:` | When the trigger fires: `:commit`, once the change's transaction commits, or `:save`, as the record is saved or destroyed — see [Choosing when a trigger fires](#choosing-when-a-trigger-fires). Defaults to `:commit`. |
 
 ### Audience: `association:` vs `affects:`
 
@@ -96,13 +97,11 @@ For a queued trigger, the owners before the change are found from the foreign ke
 
 ## Running inline
 
-`inline: true` runs the callback in the saving thread, after the change commits, rather than in a job. Use it when the callback depends on context the saving thread holds — a batch being collected, a thread-local mode — or needs to write immediately. A transaction that rolls back runs nothing, and a savepoint that rolls back (`requires_new: true`) drops only its own changes. A record saved several times in one transaction runs the callback once, on the owners it had before the transaction and those it has after.
+`inline: true` runs the callback in the saving thread, after the change commits (or inside the transaction with `at: :save`), rather than in a job. Use it when the callback depends on context the saving thread holds — a batch being collected, a thread-local mode — or needs to write immediately. A transaction that rolls back runs nothing, and a savepoint that rolls back (`requires_new: true`) drops only its own changes. A record saved several times in one transaction runs the callback once, on the owners it had before the transaction and those it has after.
 
 ```ruby
 watches association: :books, callback: :reindex!, inline: true
 ```
-
-An inline trigger's `enabled:` is evaluated at the commit.
 
 ## Wrapping the callbacks
 
@@ -127,6 +126,45 @@ end                    # SearchIndex.batch sends both here
 
 A block inside the callback would instead open and send a batch for every record. Triggers that share an observing class, a callback and an `around:` run the callback once per record inside that one block. Triggers whose `around:` differs run inside their own.
 
+## Choosing when a trigger fires
+
+`at:` sets when a trigger fires, and with it when its `enabled:` is read. `inline:` sets where its callback runs. They combine freely:
+
+| | `at: :commit` (default) | `at: :save` |
+| --- | --- | --- |
+| queued | One job per committed transaction, enqueued after the commit. A rollback enqueues nothing. | One job per save, enqueued inside the transaction. A job backend that stores jobs in the same database (Delayed Job) commits or rolls back the job with the change. |
+| `inline: true` | The callback runs after the commit, once for every change the transaction made to the record. | The callback runs inside the transaction, once per save, so what it writes commits or rolls back with the change. |
+
+Each combination has a use:
+
+**Queued, `at: :commit` (the default): refresh something outside the database.** A search index, a cache or a sync to another system should see only committed data, and should not run for a change that rolls back. A transaction that saves a record several times enqueues one job.
+
+```ruby
+# Reindex an author's search document when one of their books changes.
+watches association: :books, callback: :reindex!
+```
+
+**Inline, `at: :commit`: collect the work in the caller's thread.** A bulk import that wants each affected owner recomputed once, after the import, opens a batch around the import and lets the callbacks add to it.
+
+```ruby
+watches association: :books, callback: :add_to_reindex_batch, inline: true, enabled: -> { ReindexBatch.open? }
+```
+
+**Inline, `at: :save`: keep a stored value in the same transaction as its source.** A column on the owner that a later step of the same transaction reads, or that must roll back with the change, is updated before the transaction moves on.
+
+```ruby
+# An import step later in the same transaction checks each author's latest publication date.
+watches association: :books, attribute: :published_on, callback: :update_latest_published_on!, inline: true, at: :save
+```
+
+**Queued, `at: :save`: never lose the job, with a queue in the application's database.** Delayed Job, GoodJob and Solid Queue store jobs in the application's database, so a job enqueued inside the transaction commits or rolls back with the change, and a process that dies just after the commit cannot lose it. That suits work that must happen for every change, such as a sync to a CRM. With a queue outside the database, such as Sidekiq, the job is enqueued even when the transaction rolls back and can run before the change commits, so keep the default.
+
+```ruby
+watches association: :books, callback: :sync_to_crm, at: :save
+```
+
+A trigger that fires at the commit sees the change after every save in its transaction, so a record saved several times fires once, on the owners it had before the transaction and those it has after. A trigger that fires at the save sees each save on its own.
+
 ## Gating triggers
 
 `enabled:` lets you switch a specific trigger off for the dynamic extent of a block — useful around bulk operations that would otherwise fire the callback for every touched row, when a single batch recompute (or a periodic full rebuild) is cheaper.
@@ -140,18 +178,18 @@ end
 Reindexing.without { importer.run }
 ```
 
-The key detail is **when** the predicate is evaluated. A queued trigger's callback runs in a job, so a thread-local set inside the block would be long gone by the time the job runs. Watchtower instead evaluates `enabled:` **inline, in the saving thread**, and carries the decision into the job:
+The key detail is **when** the predicate is evaluated. A queued trigger's callback runs in a job, so a thread-local set inside the block would be long gone by the time the job runs. Watchtower instead evaluates `enabled:` **when the trigger fires, in the thread that made the change**: as the change commits, or for an `at: :save` trigger as the record saves. It carries a queued trigger's decision into the job:
 
-- The observer evaluates each matching queued trigger's `enabled:` predicate when the record saves or is destroyed, and enqueues only the triggers that pass — recording any suppressed triggers' keys in the job payload. If every matching trigger is suppressed, no job is enqueued at all.
+- The observer evaluates each matching trigger's `enabled:` predicate as it fires. It runs the inline triggers that pass, and enqueues the queued triggers that pass, recording the other triggers' keys in the job payload as suppressed. If no matching queued trigger passes, no job is enqueued at all.
 - The job honors that recorded decision; it does not re-evaluate the predicate.
 
-So a trigger gated off inside a block stays off for saves made in that block, while other triggers on the same record (e.g. a different model's `watches` on the same class) are unaffected. Triggers without `enabled:` are always enabled, so existing triggers behave exactly as before.
+So a trigger gated off inside a block stays off for changes that fire in that block, while other triggers on the same record (e.g. a different model's `watches` on the same class) are unaffected. A block opened inside a transaction does not cover the transaction's commit: a change saved in the block and committed after it is gated by the context at the commit, unless its trigger fires `at: :save`. Triggers without `enabled:` are always enabled.
 
 A predicate may be a no-arg `Proc` (a context check, as above), a one-arg `Proc` (passed the changed record, for per-record gating), or a `Symbol`/`String` sent to the changed record (e.g. `enabled: :indexable?`).
 
 ## Asynchronous processing
 
-Queued callbacks run in `Watchtower::Job`, an `ActiveJob`. It uses the application's default queue adapter (the `:async` adapter in development, so a single save doesn't spin up Delayed Job). Configure the queue/adapter as you would any other job. An inline trigger runs its callback after the commit instead (see [Running inline](#running-inline)).
+Queued callbacks run in `Watchtower::Job`, an `ActiveJob`. It uses the application's default queue adapter (the `:async` adapter in development, so a single save doesn't spin up Delayed Job). Configure the queue/adapter as you would any other job. An inline trigger runs its callback in the saving thread instead (see [Running inline](#running-inline)).
 
 ## Caveats
 

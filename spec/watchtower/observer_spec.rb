@@ -30,6 +30,16 @@ RSpec.describe Watchtower::Observer do
       expect(trigger.enabled).to be_nil
     end
 
+    it "fires at the commit unless told otherwise" do
+      trigger = described_class.build_trigger(observing_class: Author, association: :books, callback: :reindex!)
+      expect(trigger.at).to eq(:commit)
+    end
+
+    it "raises for an at: it cannot fire at" do
+      expect { described_class.build_trigger(observing_class: Author, association: :books, callback: :reindex!, at: :before_save) }
+        .to raise_error(ArgumentError, /at: must be one of \[:commit, :save\]/)
+    end
+
     it "retains an enabled predicate" do
       predicate = -> { true }
       trigger = described_class.build_trigger(observing_class: Author, association: :books, callback: :reindex!, enabled: predicate)
@@ -72,7 +82,7 @@ RSpec.describe Watchtower::Observer do
     end
   end
 
-  describe "#after_save" do
+  describe "a queued trigger" do
     let(:author) { Author.create!(name: "Ada") }
     let(:book) { Book.create!(author: author, title: "Original") }
 
@@ -111,6 +121,98 @@ RSpec.describe Watchtower::Observer do
           .to have_enqueued_job(Watchtower::Job)
           .with(hash_including(suppressed_trigger_keys: [ a_string_starting_with("Author/reindex!/books/enabled:") ]))
       end
+
+      it "reads the predicate when the change commits, not when it is saved" do
+        Author.watches(association: :books, callback: :reindex!, enabled: -> { Thread.current[:watchtower_spec_enabled] == true })
+        clear_enqueued_jobs
+
+        expect do
+          Book.transaction do
+            Thread.current[:watchtower_spec_enabled] = false
+            book.update!(title: "Changed")
+            Thread.current[:watchtower_spec_enabled] = true
+          end
+        end.to have_enqueued_job(Watchtower::Job)
+      ensure
+        Thread.current[:watchtower_spec_enabled] = nil
+      end
+    end
+
+    it "enqueues nothing for a change that rolls back" do
+      Author.watches(association: :books, callback: :reindex!)
+      clear_enqueued_jobs
+
+      expect do
+        Book.transaction do
+          book.update!(title: "Changed")
+          raise ActiveRecord::Rollback
+        end
+      end.not_to have_enqueued_job(Watchtower::Job)
+    end
+
+    it "enqueues one job for a record saved several times in one transaction, with the foreign keys from before the first save" do
+      Author.watches(association: :books, callback: :reindex!)
+      other = Author.create!(name: "Grace")
+      third = Author.create!(name: "Hedy")
+      clear_enqueued_jobs
+
+      Book.transaction do
+        book.update!(author: other)
+        book.update!(author: third)
+      end
+
+      jobs = enqueued_jobs.select { |job| job["job_class"] == "Watchtower::Job" }
+      expect(jobs.size).to eq(1)
+      expect(Watchtower::Job).to have_been_enqueued.with(hash_including(record_id: book.id, previous_foreign_keys: { "author_id" => author.id }))
+    end
+  end
+
+  describe "a trigger that fires at: :save" do
+    let(:author) { Author.create!(name: "Ada") }
+    let(:book) { Book.create!(author: author, title: "Original") }
+
+    before { book }
+
+    it "has a key of its own" do
+      at_commit = described_class.build_trigger(observing_class: Author, association: :books, callback: :reindex!)
+      at_save = described_class.build_trigger(observing_class: Author, association: :books, callback: :reindex!, at: :save)
+
+      expect(at_save.key).to eq("#{at_commit.key}/at:save")
+    end
+
+    it "enqueues its job as the record saves, reading the predicate then" do
+      gate = { open: true }
+      Author.watches(association: :books, callback: :reindex!, at: :save, enabled: -> { gate[:open] })
+      clear_enqueued_jobs
+
+      Book.transaction do
+        book.update!(title: "Changed")
+        expect(Watchtower::Job).to have_been_enqueued, "the job is enqueued before the commit"
+        gate[:open] = false
+      end
+    end
+
+    it "runs an inline callback inside the transaction, so a rollback undoes what it wrote" do
+      Author.watches(association: :books, callback: :reindex!, inline: true, at: :save)
+
+      Book.transaction do
+        book.update!(title: "Changed")
+        expect(author.reload.reindex_count).to eq(1), "the callback runs before the commit"
+        raise ActiveRecord::Rollback
+      end
+
+      expect(author.reload.reindex_count).to eq(0)
+    end
+
+    it "enqueues a job apart from a trigger that fires at the commit, each suppressing the other" do
+      Author.watches(association: :books, callback: :reindex!, at: :save)
+      Author.watches(association: :books, callback: :touch)
+      clear_enqueued_jobs
+
+      book.update!(title: "Changed")
+
+      jobs = enqueued_jobs.select { |job| job["job_class"] == "Watchtower::Job" }.map { |job| ActiveJob::Arguments.deserialize(job["arguments"]).first }
+      expect(jobs.map { |payload| payload[:suppressed_trigger_keys] }).to contain_exactly([ "Author/touch/books" ], [ "Author/reindex!/books/at:save" ])
     end
   end
 end
