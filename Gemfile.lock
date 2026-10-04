@@ -2,7 +2,7 @@ PATH
   remote: .
   specs:
     watchtower (0.1.0)
-      rails (>= 5.2)
+      rails (>= 7.2)
       rails-observers
 
 GEM
