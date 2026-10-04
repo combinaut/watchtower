@@ -23,10 +23,13 @@ module Watchtower
     end
 
     # The owners the record had before the change: for a destroy or a move, its previous owners, and otherwise the
-    # owners it has after the change. Nil when it may have moved and they cannot be known: an `affects:` scope on
-    # anything but a destroy, or, through an association whose source is itself a `has_many :through`, a change to one
-    # of the record's own `belongs_to` foreign keys.
+    # owners it has after the change. Nil when they cannot be known:
+    #   - a scoped association, whose scope can take in or leave out the record without any key changing
+    #   - an `affects:` scope, on anything but a destroy
+    #   - through an association whose source is itself a `has_many :through`, a change to one of the record's own
+    #     `belongs_to` foreign keys
     def owners_before(change)
+      return nil if scoped?
       return previous_owners(change) || current(change) || observing_class.none if change.destroyed
       return previous_owners(change) || observing_class.none if moved?(change)
       return nil if possibly_moved?(change)
@@ -46,6 +49,10 @@ module Watchtower
 
     def moved?(change)
       @watch.foreign_key_attributes.intersect?(change.changed_attributes)
+    end
+
+    def scoped?
+      reflection&.chain&.any?(&:scope)
     end
 
     def possibly_moved?(change)

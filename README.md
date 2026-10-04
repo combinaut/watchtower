@@ -137,6 +137,7 @@ What an owner can be told depends on the kind of watch:
 | Polymorphic | `has_many :comments, as: :commentable`<br>`watches association: :comments, callback: :comment_changed` | `:added`, `:removed`, `:changed` | before: from the comment's previous `commentable_id` and `commentable_type`; after: the comment's current commentable |
 | `has_many :through` | `has_many :reviews, through: :books`<br>`watches association: :reviews, callback: :review_changed` | `:added`, `:removed`, `:changed`¹ | before: from the previous foreign keys of the review or the book |
 | Nested `has_many :through` | `has_many :publisher_reviews, through: :publishers, source: :reviews`<br>`watches association: :publisher_reviews, callback: :review_changed` | `:changed`; `nil` when the record may have moved² | before: `nil` when the record may have moved²; after: the current owners |
+| Scoped association | `has_many :published_books, -> { where(published: true) }, class_name: "Book"`<br>`watches association: :published_books, callback: :book_changed` | `nil`⁵ | before: `nil`⁵; after: the current owners |
 | `affects:` scope | `watches class: "Book", affects: ->(book) { Author.where(id: book.author_id) }, callback: :book_changed` | `:removed` on a destroy; `nil` otherwise³ | before: known only on a destroy³; after: the scope's result |
 | The owner `belongs_to` the watched record | on `Book`: `belongs_to :author`<br>`watches association: :author, callback: :author_changed` | `:changed`; `:removed` when the author is destroyed⁴ | after: the books that point at the author |
 
@@ -144,6 +145,7 @@ What an owner can be told depends on the kind of watch:
 2. When the association's source is itself a `has_many :through`, as here where `Publisher` has `has_many :reviews, through: :books`, the changed record holds no foreign key that Watchtower reads to find its owners. Watchtower then treats a change to any of the record's own `belongs_to` foreign keys as a possible move, and leaves its previous owners unknown. Destroying such a record runs no callback, since neither its previous owners nor its current ones can be read (see [Caveats](#caveats)).
 3. An `affects:` scope may select owners by anything, so Watchtower cannot tell which owners a change added or removed. A destroy's owners are read before the record is gone.
 4. A change to an `Author` does not change which books point at it, so it neither adds nor removes any.
+5. A scope can take in or leave out a record without any key changing, as when a book is published, so Watchtower cannot tell which owners gained or lost it. This applies wherever a scope appears along the association, including on an association it passes through.
 
 ## Moves and destroys
 
@@ -288,6 +290,7 @@ Queued callbacks run in `Watchtower::Job`, an `ActiveJob`, so the change that fi
   | A review moves to another book, or is destroyed | no author |
 - **`affects:` on a move.** An `affects:` scope is evaluated on the associated record as it is when the callback runs, so it reaches only the current owners.
 - **STI.** The change payload identifies the associated record by `base_class`, so triggers are matched against the base class of an STI hierarchy.
+- **Scoped associations.** An associated record that stops matching an association's scope without a key changing, e.g. a book unpublished under `has_many :published_books, -> { where(published: true) }`, is no longer joined to its owner, so the change reaches no owner and no callback runs.
 - **Saves through an out-of-date instance.** A move's previous owner is the one the saving instance last loaded or saved, not the one stored in the database, so a save costs no extra read. When a book is loaded under Ada, another process moves it to Grace and commits, and the first instance then moves it to Hedy, that save reports Ada as the previous owner, and Grace, who held the book, is not reached. The save also overwrites a change it never saw, so reload an instance before saving it after another may have written the row.
 
 ## Development

@@ -130,6 +130,36 @@ RSpec.describe "A callback given the change" do
     expect(seen.sole.last).to have_attributes(kind: :changed, record: ada, changed_attributes: a_collection_including("name"))
   end
 
+  it "leaves the kind and previous owners unknown for a scoped association, whose scope can take in a record without a key changing" do
+    book
+    Author.watches(association: :published_books, callback: record_change, inline: true)
+
+    book.update!(published: true)
+
+    change = change_for("Ada").sole
+    aggregate_failures do
+      expect(change).to have_attributes(kind: nil, previous_owners: nil)
+      expect(change.owners).to contain_exactly(ada)
+    end
+  end
+
+  it "leaves the kind and previous owners unknown when a record under a nested association changes its own key" do
+    publisher = Publisher.create!(name: "Penguin")
+    other_publisher = Publisher.create!(name: "Vintage")
+    book.update!(publisher: publisher)
+    other_book = Book.create!(author: grace, publisher: other_publisher, title: "Other")
+    review = Review.create!(book: book, rating: 5)
+    Author.watches(association: :publisher_reviews, callback: record_change, inline: true)
+
+    review.update!(book: other_book)
+
+    change = change_for("Grace").sole
+    aggregate_failures do
+      expect(change).to have_attributes(kind: nil, previous_owners: nil, record: review)
+      expect(change.owners).to contain_exactly(grace)
+    end
+  end
+
   context "with an affects: scope" do
     before do
       book

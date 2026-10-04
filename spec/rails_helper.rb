@@ -22,6 +22,7 @@ ActiveRecord::Schema.define do
     t.belongs_to :publisher
     t.string :title
     t.string :genre
+    t.boolean :published, default: false, null: false
     t.string :type
     t.timestamps
   end
