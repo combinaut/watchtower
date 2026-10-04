@@ -143,20 +143,30 @@ RSpec.describe "A callback given the change" do
     end
   end
 
-  it "leaves the kind and previous owners unknown when a record under a nested association changes its own key" do
-    publisher = Publisher.create!(name: "Penguin")
-    other_publisher = Publisher.create!(name: "Vintage")
-    book.update!(publisher: publisher)
-    other_book = Book.create!(author: grace, publisher: other_publisher, title: "Other")
-    review = Review.create!(book: book, rating: 5)
-    Author.watches(association: :publisher_reviews, callback: record_change, inline: true)
+  context "on an association whose source is itself an association through another" do
+    let(:other_book) { Book.create!(author: grace, title: "Other") }
+    let(:review) { Review.create!(book: book, rating: 5) }
+    let!(:comment) { Comment.create!(commentable: review, body: "Original") }
 
-    review.update!(book: other_book)
+    before do
+      other_book
+      Author.watches(association: :review_comments, callback: record_change, inline: true)
+    end
 
-    change = change_for("Grace").sole
-    aggregate_failures do
-      expect(change).to have_attributes(kind: nil, previous_owners: nil, record: review)
-      expect(change.owners).to contain_exactly(grace)
+    it "leaves the kind and previous owners unknown when the record changes its own key" do
+      comment.update!(commentable: Review.create!(book: other_book, rating: 1))
+
+      change = change_for("Grace").sole
+      aggregate_failures do
+        expect(change).to have_attributes(kind: nil, previous_owners: nil, record: comment)
+        expect(change.owners).to contain_exactly(grace)
+      end
+    end
+
+    it "tells the owners of a moved record the association passes through first whether it was added or removed" do
+      book.update!(author: grace)
+
+      expect(seen.map { |owner, change| [ owner, change.kind ] }).to contain_exactly([ "Ada", :removed ], [ "Grace", :added ])
     end
   end
 
