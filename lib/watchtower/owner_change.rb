@@ -1,6 +1,6 @@
 module Watchtower
-  # A change to a watched record as one owner sees it. A callback that takes the change is given one for the owner it
-  # runs on (`Helpers.takes_change?`).
+  # The change to a watched record, described relative to the owner a callback runs on: whether the record was added
+  # to that owner's association, removed from it, or changed within it, and where it came from or went to.
   #
   # @!attribute kind
   #   @return [Symbol, nil] how the change affected the owner:

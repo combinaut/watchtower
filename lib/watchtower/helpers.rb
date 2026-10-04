@@ -26,7 +26,7 @@ module Watchtower
     # Whether a trigger's `callback` takes the change (`Watchtower::OwnerChange`) as well as the record of `klass` it
     # runs on: a `Proc` with a second positional parameter, or a method with a required positional parameter. A
     # method whose parameters are all optional, such as `touch`, is sent to the record with no argument.
-    def self.takes_change?(callback, klass)
+    def self.callback_wants_change?(callback, klass)
       parameters =
         case callback
         when Proc then callback.parameters.drop(1)

@@ -3,14 +3,14 @@ module Watchtower
   module Dispatch
     # Runs each of `triggers` that `change` is relevant to on every record of its audience. Triggers sharing an
     # observing class, a callback and an `around:` run the callback once per record, all of it inside that
-    # `around:` when they declare one. A callback that takes the change is also given the `Watchtower::OwnerChange`
-    # for each record (`owner_changes`).
+    # `around:` when they declare one. A callback that wants the change (`Helpers.callback_wants_change?`) is also
+    # given the `Watchtower::OwnerChange` for each record, which is built only then (`owner_changes`).
     def self.run(triggers, change)
       triggers.group_by { |trigger| [ trigger.observing_class, trigger.callback, trigger.around ] }.each do |(observing_class, callback, around), group|
         audience = audience(observing_class, group, change)
         next unless audience
 
-        owner_changes = owner_changes(observing_class, group, change) if Helpers.takes_change?(callback, observing_class)
+        owner_changes = owner_changes(observing_class, group, change) if Helpers.callback_wants_change?(callback, observing_class)
         run_callbacks = -> { run_callback(callback, audience, owner_changes) }
         around ? around.call(&run_callbacks) : run_callbacks.call
       end
