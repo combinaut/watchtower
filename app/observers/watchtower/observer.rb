@@ -204,7 +204,10 @@ module Watchtower
       (held[key] ||= []) << entry
 
       transaction = changed_record.class.current_transaction
-      transaction.after_rollback { held[key]&.delete_if { |held_entry| held_entry.equal?(entry) } }
+      transaction.after_rollback do
+        held[key]&.delete_if { |held_entry| held_entry.equal?(entry) }
+        held.delete(key) if held[key]&.empty?
+      end
       transaction.after_commit { flush(connection) }
     end
 
@@ -241,16 +244,16 @@ module Watchtower
       enqueue(queued, at, changed_record, change)
     end
 
-    # Queues `change` for the `queued` triggers that fire `at` and are enabled. The job runs every queued trigger the
-    # change reaches except those whose keys it carries as suppressed, so it carries the key of every other queued
-    # trigger: the disabled ones, and those that fire at a different `at:`, which are queued when they fire. Enqueues
-    # nothing when none of them is enabled.
+    # Queues `change` for the `queued` triggers that fire `at` and are enabled. The job runs the queued triggers that
+    # fire `at` and that the change reaches, except those whose keys it carries as suppressed: the ones disabled now.
+    # Enqueues nothing when none of them is enabled.
     def enqueue(queued, at, changed_record, change)
-      enabled = queued.select { |trigger| trigger.at == at && trigger_enabled?(trigger, changed_record) }
+      firing = queued.select { |trigger| trigger.at == at }
+      enabled = firing.select { |trigger| trigger_enabled?(trigger, changed_record) }
       return if enabled.empty?
 
-      suppressed = queued - enabled
-      payload = change.to_payload
+      suppressed = firing - enabled
+      payload = change.to_payload.merge(at: at)
       payload[:suppressed_trigger_keys] = suppressed.map(&:key) if suppressed.any?
       Watchtower::Job.perform_later(**payload)
     end

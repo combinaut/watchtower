@@ -56,6 +56,14 @@ RSpec.describe Watchtower::Observer do
           .to raise_error(ArgumentError, /enqueue_after_transaction_commit/)
       end
 
+      it "reads a truthy value kept from an earlier Rails as deferring on Rails 8.1" do
+        skip "Rails before 8.1 reads :never as not deferring" if ActiveJob.version < Gem::Version.new("8.1")
+
+        Watchtower::Job.enqueue_after_transaction_commit = :never
+
+        expect(Watchtower::Job.enqueued_after_commit?).to be(true)
+      end
+
       it "accepts an inline trigger that fires at the save, which enqueues nothing" do
         expect { described_class.build_trigger(observing_class: Author, association: :books, callback: :reindex!, at: :save, inline: true) }
           .not_to raise_error
@@ -190,6 +198,17 @@ RSpec.describe Watchtower::Observer do
       expect(payloads.first).to include(changed_attributes: a_collection_including("title", "author_id"), previous_foreign_keys: { "author_id" => author.id })
     end
 
+    it "holds nothing for a row whose only change rolls back" do
+      Author.watches(association: :books, callback: :reindex!)
+
+      Book.transaction do
+        book.update!(title: "Changed")
+        raise ActiveRecord::Rollback
+      end
+
+      expect(Book.connection.instance_variable_get(:@watchtower_held_changes)).to be_blank
+    end
+
     it "enqueues one job for a record saved several times in one transaction, with the owner from before the first save" do
       Author.watches(association: :books, callback: :reindex!)
       other = Author.create!(name: "Grace")
@@ -284,7 +303,7 @@ RSpec.describe Watchtower::Observer do
       expect(Watchtower::Job).to have_been_enqueued.with(hash_including(previous_foreign_keys: { "author_id" => author.id }))
     end
 
-    it "enqueues a job apart from a trigger that fires at the commit, each suppressing the other" do
+    it "enqueues a job apart from a trigger that fires at the commit, each naming the point it fires at" do
       Author.watches(association: :books, callback: :reindex!, at: :save)
       Author.watches(association: :books, callback: :touch)
       clear_enqueued_jobs
@@ -292,7 +311,10 @@ RSpec.describe Watchtower::Observer do
       book.update!(title: "Changed")
 
       jobs = enqueued_jobs.select { |job| job["job_class"] == "Watchtower::Job" }.map { |job| ActiveJob::Arguments.deserialize(job["arguments"]).first }
-      expect(jobs.map { |payload| payload[:suppressed_trigger_keys] }).to contain_exactly([ "Author/touch/books" ], [ "Author/reindex!/books/at:save" ])
+      aggregate_failures do
+        expect(jobs.pluck(:at)).to contain_exactly(:save, :commit)
+        expect(jobs.pluck(:suppressed_trigger_keys).compact).to be_empty, "no trigger is disabled"
+      end
     end
   end
 end

@@ -194,7 +194,7 @@ A trigger that fires at the commit fires once for each record the transaction ch
 | In one transaction | `at: :commit` | `at: :save` |
 | --- | --- | --- |
 | A book's `title` is saved twice | `reindex!` runs once on its author, after the commit | `reindex!` runs twice on its author, once for each save |
-| A book moves from Ada to Grace, then to Hedy | the callback runs on Ada and Hedy. Grace held the book only inside the transaction, so nothing she derives changed | inline, the callback runs on Ada and Grace at the first save, and on Grace and Hedy at the second. Queued, the first save's job runs on Ada and Hedy and the second's on Grace and Hedy, because each job reads the current owner when it runs |
+| A book moves from Ada to Grace, then to Hedy | the callback runs on Ada and Hedy. Grace held the book only inside the transaction, so nothing she derives changed | inline, the callback runs on Ada and Grace at the first save, and on Grace and Hedy at the second. Queued, each save's job runs on the owner before that save and on the owner when the job runs: with a queue in the application's database, that is after the commit, so Ada and Hedy, then Grace and Hedy; a queue outside the database can run a job before the commit, when its connection still sees an earlier owner |
 | The transaction rolls back | nothing runs | inline callbacks have already run, and only their database writes are undone; queued jobs are rolled back only by a queue in the same database |
 
 ## Gating triggers
