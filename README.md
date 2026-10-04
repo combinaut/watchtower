@@ -21,7 +21,7 @@ Save a `Book` and the owning `Author#reindex!` runs in a background job — no `
 2. When an observed record is saved or destroyed, an [`ActiveRecord::Observer`](https://github.com/rails/rails-observers) hook records the change (class, id, changed attributes, and the foreign keys that tied the record to its owners before a move or destroy). When the transaction commits, it enqueues one `Watchtower::Job` carrying the change. A transaction that rolls back enqueues nothing, and a record saved several times in one transaction enqueues one job.
 3. The job resolves the **audience** — the owning records affected by the change — and runs the callback on each.
 
-Because step 2 only does an enqueue, the saving request/transaction isn't slowed by the recompute; the work happens in the job. An [inline trigger](#running-inline) runs the callback after the commit instead.
+Because step 2 only does an enqueue, the saving request/transaction isn't slowed by the recompute; the work happens in the job. An [inline trigger](#running-inline) runs the callback in the saving thread instead.
 
 ## Installation
 
@@ -83,7 +83,7 @@ watches association: :books, callback: :reindex!                 # method on the
 watches association: :books, callback: ->(author) { author.reindex! }  # proc, passed the record
 ```
 
-Several triggers of an observing class that share a callback and run the same way (queued or inline) run it once per affected record, so an `Author` watching both its books' `title` and their `genre` is reindexed once when a book changes both.
+Several triggers of an observing class that share a callback and run the same way (queued or inline, at the same `at:`) run it once per affected record, so an `Author` watching both its books' `title` and their `genre` is reindexed once when a book changes both.
 
 ## Moves and destroys
 
@@ -132,8 +132,8 @@ A block inside the callback would instead open and send a batch for every record
 
 | | `at: :commit` (default) | `at: :save` |
 | --- | --- | --- |
-| queued | One job per committed transaction, enqueued after the commit. A rollback enqueues nothing. | One job per save, enqueued inside the transaction. A job backend that stores jobs in the same database (Delayed Job) commits or rolls back the job with the change. |
-| `inline: true` | The callback runs after the commit, once for every change the transaction made to the record. | The callback runs inside the transaction, once per save, so what it writes commits or rolls back with the change. |
+| queued | One job per changed record per committed transaction, enqueued after the commit. A rollback enqueues nothing. | One job per save, enqueued inside the transaction. A job backend that stores jobs in the same database (Delayed Job) commits or rolls back the job with the change. |
+| `inline: true` | The callback runs after the commit, once for all the changes the transaction made to the record. | The callback runs inside the transaction, once per save, so what it writes commits or rolls back with the change. |
 
 Each combination has a use:
 
@@ -144,7 +144,7 @@ Each combination has a use:
 watches association: :books, callback: :reindex!
 ```
 
-**Inline, `at: :commit`: collect the work in the caller's thread.** A bulk import that wants each affected owner recomputed once, after the import, opens a batch around the import and lets the callbacks add to it.
+**Inline, `at: :commit`: collect the work in the caller's thread.** A script that rewrites many books, and wants each affected author reindexed once when it finishes, opens a batch around its work and lets the callbacks add each author to it. The callback reads the batch from the script's thread, and adds an author only for a change that committed.
 
 ```ruby
 watches association: :books, callback: :add_to_reindex_batch, inline: true, enabled: -> { ReindexBatch.open? }
@@ -153,14 +153,14 @@ watches association: :books, callback: :add_to_reindex_batch, inline: true, enab
 **Inline, `at: :save`: keep a stored value in the same transaction as its source.** A column on the owner that a later step of the same transaction reads, or that must roll back with the change, is updated before the transaction moves on.
 
 ```ruby
-# An import step later in the same transaction checks each author's latest publication date.
+# A later statement in the same transaction reads `authors.latest_published_on`, and a rollback undoes it with the books.
 watches association: :books, attribute: :published_on, callback: :update_latest_published_on!, inline: true, at: :save
 ```
 
-**Queued, `at: :save`: never lose the job, with a queue in the application's database.** Delayed Job, GoodJob and Solid Queue store jobs in the application's database, so a job enqueued inside the transaction commits or rolls back with the change, and a process that dies just after the commit cannot lose it. That suits work that must happen for every change, such as a sync to a CRM. With a queue outside the database, such as Sidekiq, the job is enqueued even when the transaction rolls back and can run before the change commits, so keep the default.
+**Queued, `at: :save`: never lose the job, with a queue in the application's database.** A queue such as Delayed Job or GoodJob stores jobs in the application's database, so a job enqueued inside the transaction commits or rolls back with the change, and a process that dies just after the commit cannot lose it. That suits work that must happen for every change, such as notifying another system of each change to an author's books. With a queue outside the database, such as Sidekiq, the job is enqueued even when the transaction rolls back and can run before the change commits, so keep the default.
 
 ```ruby
-watches association: :books, callback: :sync_to_crm, at: :save
+watches association: :books, callback: :notify_storefront!, at: :save
 ```
 
 A queued `at: :save` trigger depends on Active Job writing the job when `perform_later` is called. Active Job's `enqueue_after_transaction_commit` setting instead holds every enqueue until the surrounding transaction commits, which would quietly turn `at: :save` back into `at: :commit`. So declaring a queued `at: :save` trigger raises `ArgumentError` while that setting is on for `Watchtower::Job`. Watchtower never changes the setting itself: turn it off for `Watchtower::Job`, or keep the trigger at the commit. The check runs when the trigger is declared, so it misses a setting turned on after the trigger was declared.
@@ -169,7 +169,7 @@ A queued `at: :save` trigger depends on Active Job writing the job when `perform
 
 A callback is given the affected owner, not the change, and it recomputes from the database. So what matters is how many times it runs, and for which owners.
 
-**At the commit**, every save and destroy of a row in one transaction becomes one change, even when the row was saved through several instances of it. The change lists every attribute any of those saves changed, and the owners the row had before its first save. Each callback then runs once for each owner the change reaches, however many saves made it, and however many of the callback's triggers it matches:
+**At the commit**, every save and destroy of a row in one transaction becomes one change, even when the row was saved through several instances of it. The change lists every attribute any of those saves changed, and the owners the row had before its first save. Each callback then runs once for each owner the change reaches, however many saves made it, and however many of the callback's triggers it matches among those that run the same way (see [Callbacks](#callbacks)):
 
 | In one transaction | `at: :commit` | `at: :save` |
 | --- | --- | --- |
@@ -190,13 +190,14 @@ class Author < ApplicationRecord
   watches association: :books, callback: :reindex!, enabled: -> { Reindexing.enabled? }
 end
 
-# A bulk import that rewrites thousands of books, without a reindex per row:
-Reindexing.without { importer.run }
+# Rewrite thousands of books without a reindex per book, then reindex every author once:
+Reindexing.without { Book.find_each { |book| book.update!(title: book.title.strip) } }
+Author.find_each(&:reindex!)
 ```
 
 The key detail is **when** the predicate is evaluated. A queued trigger's callback runs in a job, so a thread-local set inside the block would be long gone by the time the job runs. Watchtower instead evaluates `enabled:` **when the trigger fires, in the thread that made the change**: as the change commits, or for an `at: :save` trigger as the record saves. It carries a queued trigger's decision into the job:
 
-- The observer evaluates each matching trigger's `enabled:` predicate as it fires. It runs the inline triggers that pass, and enqueues the queued triggers that pass, recording the other triggers' keys in the job payload as suppressed. If no matching queued trigger passes, no job is enqueued at all.
+- The observer evaluates each matching trigger's `enabled:` predicate as it fires. It runs the inline triggers that pass, and enqueues the queued triggers that pass, recording the other queued triggers' keys in the job payload as suppressed. If no matching queued trigger passes, no job is enqueued at all.
 - The job honors that recorded decision; it does not re-evaluate the predicate.
 
 So a trigger gated off inside a block stays off for changes that fire in that block, while other triggers on the same record (e.g. a different model's `watches` on the same class) are unaffected. A block opened inside a transaction does not cover the transaction's commit: a change saved in the block and committed after it is gated by the context at the commit, unless its trigger fires `at: :save`. Triggers without `enabled:` are always enabled.

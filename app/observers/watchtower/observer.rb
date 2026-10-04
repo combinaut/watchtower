@@ -76,7 +76,7 @@ module Watchtower
     end
 
     # FIRING_POINTS are the moments a trigger can fire, its `at:`:
-    #   - commit:  when the transaction that made the change commits, once for every change it made to the record
+    #   - commit:  when the transaction that made the change commits, once for all the changes it made to the record
     #   - save:    as the record is saved or destroyed, inside its transaction, once per save
     FIRING_POINTS = %i[commit save].freeze
 
@@ -180,8 +180,8 @@ module Watchtower
 
     # Fires the `at: :commit` triggers on the change the transaction committed to the record's row: every save and
     # destroy of the row in the transaction, through any instance of it, merged into one that keeps the foreign keys
-    # from before the first save, leaving out those a savepoint rolled back. Rails runs this on one instance of the
-    # row, or on each on Rails before 7.1, where the first takes every pending change and the rest find none.
+    # from before the first save, leaving out those a savepoint rolled back. The first instance of the row to get
+    # here takes every pending change, so any later one finds none.
     def after_commit(changed_record)
       changes = pending_changes(changed_record).delete(row_key(changed_record))
       change = changes&.reject { |transaction, _| discarded?(transaction) }&.map(&:last)&.reduce(:merge)
@@ -214,7 +214,7 @@ module Watchtower
     end
 
     # Fires `change` for the `triggers` that fire `at`, in this thread, reading each one's `enabled` predicate now,
-    # while any caller-set context, such as a thread-local opened around an importer, is still live. The enabled
+    # while any caller-set context, such as a thread-local set around a block of writes, is still live. The enabled
     # inline triggers run here, and the enabled queued ones run in one `Watchtower::Job`.
     def fire(triggers, at, changed_record, change)
       inline, queued = triggers.partition(&:inline)
@@ -224,8 +224,8 @@ module Watchtower
 
     # Queues `change` for the `queued` triggers that fire `at` and are enabled. The job runs every queued trigger the
     # change reaches except those whose keys it carries as suppressed, so it carries every other trigger's key: the
-    # disabled ones, and those that fire at the other point, which get their own job. Enqueues nothing when no
-    # trigger is left.
+    # disabled ones, and those that fire at a different `at:`, which get a job of their own. Enqueues nothing when
+    # none of them is enabled.
     def enqueue(queued, at, changed_record, change)
       enabled = queued.select { |trigger| trigger.at == at && trigger_enabled?(trigger, changed_record) }
       return if enabled.empty?
