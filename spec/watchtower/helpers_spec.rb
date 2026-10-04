@@ -32,4 +32,27 @@ RSpec.describe Watchtower::Helpers do
       expect { described_class.evaluate(42, author) }.to raise_error(/Unhandled callable/)
     end
   end
+
+  describe ".takes_change?" do
+    it "is true for a proc with a second parameter" do
+      expect(described_class.takes_change?(->(_author, _change) { }, Author)).to be(true)
+    end
+
+    it "is false for a proc that takes only the record" do
+      expect(described_class.takes_change?(->(_author) { }, Author)).to be(false)
+    end
+
+    it "is true for a method with a required parameter" do
+      klass = Class.new(Author) { def book_changed(change) = change }
+
+      expect(described_class.takes_change?(:book_changed, klass)).to be(true)
+    end
+
+    it "is false for a method with no parameters, or only optional ones" do
+      aggregate_failures do
+        expect(described_class.takes_change?(:reindex!, Author)).to be(false)
+        expect(described_class.takes_change?(:touch, Author)).to be(false), "touch takes only optional arguments"
+      end
+    end
+  end
 end

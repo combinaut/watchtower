@@ -21,6 +21,7 @@ A trigger can also:
 - run once when the transaction commits, for all of a record's changes combined, or once for each save (see [Choosing when a trigger fires](#choosing-when-a-trigger-fires))
 - be switched off for the extent of a block, with a predicate read when it fires (see [Gating triggers](#gating-triggers))
 - wrap all the callbacks of one change in a block (see [Wrapping the callbacks](#wrapping-the-callbacks))
+- tell its callback whether the associated record was added, changed or removed, and where it came from or went to (see [Knowing what changed](#knowing-what-changed))
 
 ## How it works
 
@@ -45,7 +46,7 @@ The engine adds `watches` to every model and registers the observer, so no initi
 | `association:` | A `has_many` / `belongs_to` on the observing model. When one of its records is added, changed or removed, the owners it reaches are the audience. |
 | `affects:` | An alternative to `association:`, a `Proc` (given the associated record) or method name returning the relation of owners to run on. Use it when the audience can't be expressed as a single association join. Requires `class:`. |
 | `class:` | The observed class. Inferred from `association:`. Give it when using `affects:`, or when the association isn't defined yet at declaration time. |
-| `callback:` | What to run on each owner in the audience. A `Symbol`/`String` is sent to the owner; a `Proc` is called (passed the owner if it takes an argument). |
+| `callback:` | What to run on each owner in the audience. A `Symbol`/`String` is sent to the owner; a `Proc` is called (passed the owner if it takes an argument). It can also be given the change (see [Knowing what changed](#knowing-what-changed)). |
 | `attribute:` / `attributes:` | Fire for a changed associated record only when one of these attributes changed. An added or removed record always fires. Omit to fire on any change. |
 | `includes:` | Associations to eager-load on the audience before running the callback (avoids N+1 in the callback). |
 | `enabled:` | A predicate gating the trigger (see [Gating triggers](#gating-triggers)). Defaults to always enabled. |
@@ -96,6 +97,53 @@ watches association: :books, attribute: :genre, callback: :reindex!
 
 book.update!(title: "Persuasion", genre: "Novel")  # reindexes the book's author once, not twice
 ```
+
+### Knowing what changed
+
+A callback that takes the change as well as the owner is given a `Watchtower::OwnerChange`, describing the change as that owner sees it. A method takes it as a required argument, and a proc as its second parameter. A callback without one is called with the owner alone.
+
+```ruby
+class Author < ApplicationRecord
+  has_many :books
+  watches association: :books, callback: :book_changed   # or callback: ->(author, change) { ... }
+
+  def book_changed(change)
+    case change.kind
+    when :added   then record_arrival(change.record, from: change.previous_owners)
+    when :removed then record_departure(change.record_id, to: change.owners)
+    when :changed then refresh_book(change.record, change.changed_attributes)
+    end
+  end
+end
+```
+
+| Method | Value |
+| --- | --- |
+| `kind` | `:added` when the record became one of the owner's, `:removed` when it stopped being one (including by being destroyed), `:changed` when it was one before and after, or `nil` when its previous owners cannot be known |
+| `record` | the changed record; `nil` when a job runs after it was destroyed or deleted |
+| `record_class`, `record_id` | the changed record's class and id |
+| `destroyed?` | whether the record was destroyed |
+| `changed_attributes` | the attributes the change saved; empty for a destroy, unless a trigger that fires at the commit merged it with an earlier save |
+| `previous_owners` | the owners before the change, as a relation, which for an added record says where it came from; `nil` when they cannot be known |
+| `owners` | the owners after the change, as a relation, which for a removed record says where it went; none once it is destroyed |
+
+A trigger that fires at the commit describes the transaction's changes merged into one, so a book moved from Ada to Grace to Hedy tells Ada it was removed, with Hedy as its owner, and tells Hedy it was added, with Ada as its previous owner. The callback does not run on Grace, who held the book only inside the transaction. A trigger that fires `at: :save` describes each step.
+
+What an owner can be told depends on the kind of watch:
+
+| Watch | Declaration | `kind` | `previous_owners` / `owners` |
+| --- | --- | --- | --- |
+| Direct `has_many` or `has_one` | `has_many :books`<br>`watches association: :books, callback: :book_changed` | `:added`, `:removed`, `:changed` | before: from the book's previous `author_id`; after: the book's current author |
+| Polymorphic | `has_many :comments, as: :commentable`<br>`watches association: :comments, callback: :comment_changed` | `:added`, `:removed`, `:changed` | before: from the comment's previous `commentable_id` and `commentable_type`; after: the comment's current commentable |
+| `has_many :through` | `has_many :reviews, through: :books`<br>`watches association: :reviews, callback: :review_changed` | `:added`, `:removed`, `:changed`¹ | before: from the previous foreign keys of the review or the book |
+| Nested `has_many :through` | `has_many :publisher_reviews, through: :publishers, source: :reviews`<br>`watches association: :publisher_reviews, callback: :review_changed` | `:changed`; `nil` when the record may have moved² | before: `nil` when the record may have moved²; after: the current owners |
+| `affects:` scope | `watches class: "Book", affects: ->(book) { Author.where(id: book.author_id) }, callback: :book_changed` | `:removed` on a destroy; `nil` otherwise³ | before: known only on a destroy³; after: the scope's result |
+| The owner `belongs_to` the watched record | on `Book`: `belongs_to :author`<br>`watches association: :author, callback: :author_changed` | `:changed`; `:removed` when the author is destroyed⁴ | after: the books that point at the author |
+
+1. A change can come from the record the association passes through. When a `Book` moves from Ada to Grace, Ada loses its reviews and Grace gains them, and `change.record` is the `Book`, not a review.
+2. When the association's source is itself a `has_many :through`, as here where `Publisher` has `has_many :reviews, through: :books`, the changed record holds no foreign key that Watchtower reads to find its owners. Watchtower then treats a change to any of the record's own `belongs_to` foreign keys as a possible move, and leaves its previous owners unknown. Destroying such a record runs no callback, since neither its previous owners nor its current ones can be read (see [Caveats](#caveats)).
+3. An `affects:` scope may select owners by anything, so Watchtower cannot tell which owners a change added or removed. A destroy's owners are read before the record is gone.
+4. A change to an `Author` does not change which books point at it, so it neither adds nor removes any.
 
 ## Moves and destroys
 
