@@ -225,12 +225,13 @@ Queued callbacks run in `Watchtower::Job`, an `ActiveJob`. It uses the applicati
 ## Development
 
 ```bash
-bin/setup          # install dependencies
-bundle exec rspec  # run the test suite
+bin/setup                              # install dependencies
+bundle exec rake                       # run the test suite (test/ and spec/)
+bundle exec appraisal rails-7.2 rake   # against Rails 7.2; rails-8.0 likewise
 bundle exec rubocop
 ```
 
-The suite boots a dummy Rails app (`spec/dummy`) with `Author` / `Book` / `Review` / `Publisher` / `Comment` models and exercises the helpers, the observer, and the job.
+CI runs the suite against every Rails version Watchtower supports: the `Gemfile`'s, and each one in `Appraisals`. The suite boots a dummy Rails app (`spec/dummy`) with `Author` / `Book` / `Review` / `Publisher` / `Comment` models and exercises the helpers, the observer, and the job.
 
 ## License
 
