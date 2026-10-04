@@ -23,7 +23,7 @@ Gem::Specification.new do |spec|
   end
 
   spec.required_ruby_version = ">= 4.0"
-  spec.add_dependency "rails", ">= 5.2"
+  spec.add_dependency "rails", ">= 7.2"
   spec.add_dependency "rails-observers"
   spec.add_development_dependency "appraisal"
 end

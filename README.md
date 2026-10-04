@@ -31,6 +31,8 @@ gem "watchtower", git: "git@github.com:combinaut/watchtower.git"
 
 The engine includes the DSL into `ActiveRecord::Base` and registers the observer automatically. No initializer required.
 
+Watchtower requires Rails 7.2 or newer.
+
 ## Usage
 
 `watches` is available on every model. It accepts the following options:
