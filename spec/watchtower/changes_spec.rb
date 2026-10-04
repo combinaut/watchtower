@@ -162,6 +162,51 @@ RSpec.describe "Watchtower triggers on saves, moves and destroys" do
       end
     end
 
+    # The association's source, `Book#review_comments`, is itself a `has_many :through` the reviews. Watchtower
+    # watches the comments and the books, but not the reviews inside the source.
+    context "on an association whose source is itself an association through another" do
+      let(:other_book) { Book.create!(author: other_author, title: "Other") }
+      let(:review) { Review.create!(book: book, rating: 5) }
+      let!(:comment) { Comment.create!(commentable: review, body: "Original") }
+
+      before do
+        other_book
+        Author.watches(association: :review_comments, callback: :reindex!)
+      end
+
+      it "runs on the owner of a changed record" do
+        expect { comment.update!(body: "Changed") }.to reindex(author).and not_reindex(other_author)
+      end
+
+      it "runs on the owners before and after a move of the record the association passes through first" do
+        expect { book.update!(author: other_author) }.to reindex(author, other_author)
+      end
+
+      it "runs on the owner of a destroyed record the association passes through first" do
+        Comment.where(commentable: review).delete_all
+        review.delete
+
+        expect { book.destroy! }.to reindex(author)
+      end
+
+      it "runs only on the new owner of a moved record" do
+        other_review = Review.create!(book: other_book, rating: 1)
+
+        expect { comment.update!(commentable: other_review) }.to reindex(other_author).and not_reindex(author)
+      end
+
+      it "runs on no owner of a destroyed record" do
+        expect { comment.destroy! }.to not_reindex(author, other_author)
+      end
+
+      it "runs on no owner when a record inside the source moves or is destroyed" do
+        aggregate_failures do
+          expect { review.update!(book: other_book) }.to not_reindex(author, other_author)
+          expect { review.destroy! }.to not_reindex(author, other_author)
+        end
+      end
+    end
+
     it "runs an enabled trigger that shares its association and callback with a disabled one" do
       Author.watches(association: :books, callback: :reindex!, around: ->(&callbacks) { callbacks.call }, enabled: -> { false })
       Author.watches(association: :books, callback: :reindex!, around: ->(&callbacks) { callbacks.call })

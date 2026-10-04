@@ -226,7 +226,10 @@ Queued callbacks run in `Watchtower::Job`, an `ActiveJob`. It uses the applicati
 
 ## Caveats
 
-- **Nested through associations.** For an association through another whose source is itself a through association, only the first record it passes through is watched, and a move of the association's own records reaches only their current owners.
+- **Nested through associations.** When an association's source is itself a `has_many :through`, Watchtower watches the association's own records and the records on its `through:` side, but not the records inside the source. With `has_many :review_comments, through: :books` on `Author`, where `Book` has `has_many :review_comments, through: :reviews, source: :comments`, it watches the comments and the books, not the reviews:
+  - a comment that is saved reaches its author; a book that moves to another author reaches both authors, and one that is destroyed reaches its author
+  - a comment moved to a review on another book reaches only its new author, and a destroyed comment reaches no author
+  - a review moved to another book, or destroyed, reaches no author
 - **`affects:` on a move.** An `affects:` scope is evaluated on the record as it is when the callback runs, so it reaches only the current owners.
 - **STI.** The change payload identifies the record by `base_class`, so triggers are matched against the base class of an STI hierarchy.
 - **Saves through an out-of-date instance.** A move's previous owner is the one the saving instance last loaded or saved, not the one stored in the database, so a save costs no extra read. When a book is loaded under Ada, another process moves it to Grace and commits, and the first instance then moves it to Hedy, that save reports Ada as the previous owner, and Grace, who held the book, is not reached. The save also overwrites a change it never saw, so reload an instance before saving it after another may have written the row.
