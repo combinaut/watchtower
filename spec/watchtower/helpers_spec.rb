@@ -48,6 +48,15 @@ RSpec.describe Watchtower::Helpers do
       expect(described_class.callback_wants_change?(:book_changed, klass)).to be(true)
     end
 
+    it "is false for a method the class answers through method_missing" do
+      klass = Class.new(Author) do
+        def method_missing(name, *args) = name == :dynamic_callback ? :called : super
+        def respond_to_missing?(name, include_private = false) = name == :dynamic_callback || super
+      end
+
+      expect(described_class.callback_wants_change?(:dynamic_callback, klass)).to be(false)
+    end
+
     it "is false for a method with no parameters, or only optional ones" do
       aggregate_failures do
         expect(described_class.callback_wants_change?(:reindex!, Author)).to be(false)
