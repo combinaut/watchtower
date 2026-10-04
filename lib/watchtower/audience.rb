@@ -15,7 +15,8 @@ module Watchtower
       [ current(change), previous_owners(change) ].compact
     end
 
-    # The owners the record has after the change: none once it is destroyed or can no longer be loaded.
+    # The owners the record has after the change: none once it is destroyed, or, unless the owners `belongs_to` it,
+    # once it can no longer be loaded.
     def owners_after(change)
       return observing_class.none if change.destroyed
 

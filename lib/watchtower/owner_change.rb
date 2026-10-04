@@ -1,13 +1,13 @@
 module Watchtower
-  # A change to a watched record as one owner sees it. A callback that takes a second argument is given one for the
-  # owner it runs on (`Helpers.takes_change?`).
+  # A change to a watched record as one owner sees it. A callback that takes the change is given one for the owner it
+  # runs on (`Helpers.takes_change?`).
   #
   # @!attribute kind
   #   @return [Symbol, nil] how the change affected the owner:
   #     - `:added`    the record became one of the owner's
   #     - `:removed`  the record stopped being one of the owner's, including by being destroyed
   #     - `:changed`  the record was one of the owner's before the change and after it
-  #     - `nil`       the record may have moved and its previous owners cannot be known (see the README's Caveats)
+  #     - `nil`       the previous owners cannot be known (`Audience#owners_before`)
   # @!attribute record
   #   @return [ActiveRecord::Base, nil] the changed record; nil when a job runs after it was destroyed or deleted
   # @!attribute record_class
