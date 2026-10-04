@@ -35,7 +35,7 @@ RSpec.describe Watchtower::Observer do
       expect(trigger.at).to eq(:commit)
     end
 
-    it "raises for an at: it cannot fire at" do
+    it "raises for an at: other than :commit or :save" do
       [ :before_save, 1, false ].each do |at|
         expect { described_class.build_trigger(observing_class: Author, association: :books, callback: :reindex!, at: at) }
           .to raise_error(ArgumentError, /at: must be one of \[:commit, :save\]/), "at: #{at.inspect}"
@@ -220,7 +220,7 @@ RSpec.describe Watchtower::Observer do
       expect(Watchtower::Job).to have_been_enqueued
     end
 
-    it "fires a save made while a committing transaction runs its callbacks with that save's own transaction" do
+    it "enqueues a job of its own for a save made in a committing transaction's after_commit block" do
       Author.watches(association: :books, callback: :reindex!)
       other = Author.create!(name: "Grace")
       third = Author.create!(name: "Hedy")

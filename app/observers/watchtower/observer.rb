@@ -38,8 +38,8 @@ module Watchtower
       options[:at] = options[:at].to_sym if options[:at].respond_to?(:to_sym)
       raise ArgumentError, "at: must be one of #{FIRING_POINTS.inspect}, got #{options[:at].inspect}" unless FIRING_POINTS.include?(options[:at])
       if options[:at] == :save && !options[:inline] && Watchtower::Job.enqueued_after_commit?
-        raise ArgumentError, "at: :save cannot enqueue its job inside the transaction while Active Job's " \
-                             "enqueue_after_transaction_commit is on for Watchtower::Job, which defers the enqueue until after the commit"
+        raise ArgumentError, "at: :save cannot enqueue its job inside the transaction while Active Job defers " \
+                             "Watchtower::Job's enqueue until after the commit (enqueue_after_transaction_commit)"
       end
 
       reflection = options[:observing_class].reflect_on_association(options[:association]) if options[:association]
@@ -75,9 +75,9 @@ module Watchtower
       [ source.foreign_key, (source.foreign_type if source.polymorphic?) ].compact
     end
 
-    # FIRING_POINTS are the moments a trigger can fire, its `at:`. Either way it fires once per save or destroy.
-    #   - commit:  when the transaction that made the change commits
-    #   - save:    as the record is saved or destroyed, inside its transaction
+    # FIRING_POINTS are the moments a trigger can fire, its `at:`:
+    #   - commit:  once the transaction that made the change commits, once for each record it changed
+    #   - save:    as the record is saved or destroyed, inside its transaction, once per save or destroy
     FIRING_POINTS = %i[commit save].freeze
 
     Trigger = Struct.new(:observing_class, :callback, :association, :attributes, :class, :affects, :includes, :enabled, :inline, :around, :at, :watches, keyword_init: true) do
@@ -226,8 +226,8 @@ module Watchtower
       end
     end
 
-    # The changes awaiting a commit on `connection`, `{ [class name, id] => [[record, change], ...] }` in the order
-    # they were saved.
+    # The changes awaiting a commit on `connection`, `{ [base class name, id] => [[record, change], ...] }` in the
+    # order they were saved.
     def held_changes(connection)
       connection.instance_variable_get(:@watchtower_held_changes) || connection.instance_variable_set(:@watchtower_held_changes, {})
     end
@@ -242,9 +242,9 @@ module Watchtower
     end
 
     # Queues `change` for the `queued` triggers that fire `at` and are enabled. The job runs every queued trigger the
-    # change reaches except those whose keys it carries as suppressed, so it carries every other trigger's key: the
-    # disabled ones, and those that fire at a different `at:`, which get a job of their own. Enqueues nothing when
-    # none of them is enabled.
+    # change reaches except those whose keys it carries as suppressed, so it carries the key of every other queued
+    # trigger: the disabled ones, and those that fire at a different `at:`, which are queued when they fire. Enqueues
+    # nothing when none of them is enabled.
     def enqueue(queued, at, changed_record, change)
       enabled = queued.select { |trigger| trigger.at == at && trigger_enabled?(trigger, changed_record) }
       return if enabled.empty?
