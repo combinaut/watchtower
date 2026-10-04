@@ -17,9 +17,9 @@ Save a `Book` and the owning `Author#reindex!` runs in a background job — no `
 
 ## What Watchtower is for
 
-Watchtower keeps state an owner derives from its associations current. A callback is given the owner, not the change, and recomputes from the database what the owner derives: a search index document, a cached total, a denormalized column. A recompute reads the current state, so running it again does no harm, and Watchtower runs it once for several changes to the same record where it can.
+Watchtower runs a callback on the owners of a record when the record changes: the author of a book that is saved, moved or destroyed. Its main use is keeping state an owner derives from its associations current, such as a search index document, a cached total or a denormalized column. The callback recomputes that state from the database, so running it again does no harm, and Watchtower runs it once for several changes to the same record where it can.
 
-It is not for recording what happened. An audit log, a notification for each change, or anything else that needs to know which record changed, from what and to what, belongs in the changed record's own callbacks, or in a library such as PaperTrail, where those facts are.
+It is not for a record reacting to its own changes. A `Book` that sets its slug from its title, or keeps a history of its own edits, does that in its own callbacks. Watchtower is for the owners on the other side of an association.
 
 ## How it works
 
@@ -141,6 +141,8 @@ A block inside the callback would instead open and send a batch for every record
 - **`at: :commit` converges** on the committed state. The trigger fires once the transaction commits, once for each record the transaction changed, on the owners the record had before the transaction and the owners it has after. Anything in between is skipped.
 - **`at: :save` follows every step.** The trigger fires as each save or destroy happens, inside the transaction, on the owners the record had before that save and the owners it has after.
 
+A record can have several owners. A book has one author, but a publisher belongs to every author who has a book it published (`has_many :publishers, through: :books`), so a change to a publisher reaches all of them.
+
 `inline:` sets where the callback runs. The two combine freely:
 
 | | `at: :commit` (default) | `at: :save` |
@@ -150,27 +152,26 @@ A block inside the callback would instead open and send a batch for every record
 
 Each combination has a use:
 
-**Queued, `at: :commit` (the default): refresh something outside the database.** A search index, a cache or a sync to another system should see only committed data, and should not run for a change that rolls back.
+**Queued, `at: :commit` (the default).** Best for: updating something outside the database, such as a search index, a cache, or another system's copy of the data. The job sees only committed data, never runs for a change that rolls back, and runs once for a record saved several times in one transaction.
 
 ```ruby
 # Reindex an author's search document when one of their books changes.
 watches association: :books, callback: :reindex!
 ```
 
-**Inline, `at: :commit`: collect the work in the caller's thread.** A script that rewrites many books, and wants each affected author reindexed once when it finishes, opens a batch around its work and lets the callbacks add each author to it. The callback reads the batch from the script's thread, and adds an author only for a change that committed.
+**Inline, `at: :commit`.** Best for: work that the code making the changes collects and finishes itself. A script that rewrites many books opens a batch, the callbacks add each affected author to it, and the script reindexes each author once when it finishes. The callback runs in the script's thread, where it can reach the batch, and only for changes that committed.
 
 ```ruby
 watches association: :books, callback: :add_to_reindex_batch, inline: true, enabled: -> { ReindexBatch.open? }
 ```
 
-**Inline, `at: :save`: keep a stored value in the same transaction as its source.** A column on the owner that a later step of the same transaction reads, or that must roll back with the change, is updated before the transaction moves on.
+**Inline, `at: :save`.** Best for: a value on the owner that later steps of the same transaction rely on. Say `authors.latest_published_on` holds the date of each author's latest book, and one transaction adds a book and then selects authors by that date. A callback that fires at the commit would update the column after that query had run. One that fires at the save updates it as the book is saved, so the query sees the new date, and a rollback undoes the update along with the book.
 
 ```ruby
-# A later statement in the same transaction reads `authors.latest_published_on`, and a rollback undoes it with the books.
 watches association: :books, attribute: :published_on, callback: :update_latest_published_on!, inline: true, at: :save
 ```
 
-**Queued, `at: :save`: never lose the job, with a queue in the application's database.** A queue such as Delayed Job or GoodJob stores jobs in the application's database, so a job enqueued inside the transaction commits or rolls back with the change, and a process that dies just after the commit cannot lose it. That suits work that must not be lost, such as keeping another system's copy of each author's book list current, where a lost job leaves it stale until the author's books change again. With a queue outside the database, such as Sidekiq, the job is enqueued even when the transaction rolls back and can run before the change commits, so keep the default.
+**Queued, `at: :save`.** Best for: work that must not be lost, when the queue stores its jobs in the application's database. A queue such as Delayed Job or GoodJob does, so a job enqueued inside the transaction commits or rolls back with the change, and a process that dies just after the commit cannot lose it. That suits keeping another system's copy of each author's book list current, where a lost job leaves it stale until the author's books change again. With a queue outside the database, such as Sidekiq, the job is enqueued even when the transaction rolls back and can run before the change commits, so keep the default.
 
 ```ruby
 watches association: :books, callback: :notify_storefront!, at: :save
@@ -187,8 +188,6 @@ end
 ```
 
 ### What fires, and how often
-
-A callback recomputes the owner it is given, so what matters is how many times it runs, and for which owners.
 
 A trigger that fires at the commit fires once for each record the transaction changed, on all of its saves and destroys merged into one, even when they went through several instances of the record. Rails' transaction callbacks (`current_transaction.after_commit`) deliver it once the outermost transaction commits, leaving out every save that rolled back, including one inside a savepoint (`requires_new: true`) that rolled back. A trigger that fires at the save fires once per save. Either way, each time a trigger fires, its callback runs once for each owner the change reaches, however many of the callback's triggers the change matches among those that run the same way (see [Callbacks](#callbacks)). A change reaches the owners the record had before it and the owners the record has when the callback runs, which are read from the database.
 
