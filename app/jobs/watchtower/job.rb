@@ -3,15 +3,19 @@ module Watchtower
     self.queue_adapter = :async if Rails.env.development? # Don't force Delayed Job to run just for indexing a single record in dev mode
 
     # Whether Active Job defers this job's enqueue until the surrounding transaction commits
-    # (`enqueue_after_transaction_commit`). False on a Rails without the setting. On Rails 7.2 the setting is
-    # `:always`, `:never`, or `:default`, and `:default` leaves the choice to the queue adapter.
+    # (`enqueue_after_transaction_commit`), by each Rails version's own reading of the setting:
+    #   - 7.2:  `:never` does not defer, `:always` does, and any other value asks the queue adapter
+    #   - 8.0:  `true` and `:always` defer; `false`, `:never` and `:default` do not
+    #   - 8.1:  `true` defers and `false` does not
     def self.enqueued_after_commit?
-      return false unless respond_to?(:enqueue_after_transaction_commit)
-
       setting = enqueue_after_transaction_commit
-      return queue_adapter.respond_to?(:enqueue_after_transaction_commit?) && queue_adapter.enqueue_after_transaction_commit? if setting == :default
+      if ActiveJob.version < Gem::Version.new("8.0")
+        return false if setting == :never
 
-      ![ false, nil, :never ].include?(setting)
+        return setting == :always || queue_adapter.enqueue_after_transaction_commit?
+      end
+
+      setting == true || setting == :always
     end
 
     # Runs the queued triggers on a change the observer described (`Change#to_payload`).

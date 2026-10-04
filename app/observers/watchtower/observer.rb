@@ -75,9 +75,9 @@ module Watchtower
       [ source.foreign_key, (source.foreign_type if source.polymorphic?) ].compact
     end
 
-    # FIRING_POINTS are the moments a trigger can fire, its `at:`:
-    #   - commit:  when the transaction that made the change commits, once for all the changes it made to the record
-    #   - save:    as the record is saved or destroyed, inside its transaction, once per save
+    # FIRING_POINTS are the moments a trigger can fire, its `at:`. Either way it fires once per save or destroy.
+    #   - commit:  when the transaction that made the change commits
+    #   - save:    as the record is saved or destroyed, inside its transaction
     FIRING_POINTS = %i[commit save].freeze
 
     Trigger = Struct.new(:observing_class, :callback, :association, :attributes, :class, :affects, :includes, :enabled, :inline, :around, :at, :watches, keyword_init: true) do
@@ -178,38 +178,20 @@ module Watchtower
       observe_change(changed_record, destroyed: true)
     end
 
-    # Fires the `at: :commit` triggers on the change the transaction committed to the record's row: every save and
-    # destroy of the row in the transaction, through any instance of it, merged into one that keeps the foreign keys
-    # from before the first save, leaving out those a savepoint rolled back. The first instance of the row to get
-    # here takes every pending change, so any later one finds none.
-    def after_commit(changed_record)
-      changes = pending_changes(changed_record).delete(row_key(changed_record))
-      change = changes&.reject { |transaction, _| discarded?(transaction) }&.map(&:last)&.reduce(:merge)
-      return unless change
-
-      fire(triggers_for(changed_record.class), :commit, changed_record, change)
-    end
-
-    # Forgets the changes the rolled-back transaction or savepoint made to the record's row, keeping those of an
-    # enclosing transaction, which may still commit.
-    def after_rollback(changed_record)
-      pending = pending_changes(changed_record)
-      key = row_key(changed_record)
-      return unless pending.key?(key)
-
-      pending[key] = pending[key].reject { |transaction, _| discarded?(transaction) }
-      pending.delete(key) if pending[key].empty?
-    end
-
     private
 
-    # Fires the `at: :save` triggers on the change now, and records it for the `at: :commit` ones.
+    # Fires the `at: :save` triggers on the change now, and the `at: :commit` ones once the transaction it was made
+    # in commits. Rails runs a transaction's `after_commit` blocks after its outermost transaction commits, and drops
+    # them when it, or the savepoint they were added in, rolls back. The change is captured before anything fires,
+    # so nothing a save-time trigger does to the record alters what the commit-time ones fire on.
     def observe_change(changed_record, destroyed:)
       triggers = triggers_for(changed_record.class)
       return if triggers.empty?
 
       change = Change.capture(changed_record, triggers, destroyed: destroyed, resolve_affects: destroyed)
-      remember_for_commit(changed_record, change) if triggers.any? { |trigger| trigger.at == :commit }
+      if triggers.any? { |trigger| trigger.at == :commit }
+        changed_record.class.current_transaction.after_commit { fire(triggers, :commit, changed_record, change) }
+      end
       fire(triggers, :save, changed_record, change) if triggers.any? { |trigger| trigger.at == :save }
     end
 
@@ -234,30 +216,6 @@ module Watchtower
       payload = change.to_payload
       payload[:suppressed_trigger_keys] = suppressed.map(&:key) if suppressed.any?
       Watchtower::Job.perform_later(**payload)
-    end
-
-    # Stores the change for `after_commit`, beside the transaction or savepoint that made it, so a savepoint that
-    # rolls back takes only its own changes with it. It is kept by row rather than on the record, because Rails runs
-    # `after_commit` on only one of the instances a transaction saved the row through.
-    def remember_for_commit(changed_record, change)
-      (pending_changes(changed_record)[row_key(changed_record)] ||= []) << [ changed_record.class.connection.current_transaction, change ]
-    end
-
-    # The changes awaiting a commit on the record's connection, `{ row_key => [[transaction, change], ...] }` in the
-    # order they were saved. A connection serves one thread at a time, and a transaction never spans connections.
-    def pending_changes(changed_record)
-      connection = changed_record.class.connection
-      connection.instance_variable_get(:@watchtower_pending_changes) || connection.instance_variable_set(:@watchtower_pending_changes, {})
-    end
-
-    def row_key(changed_record)
-      [ changed_record.class.base_class.name, changed_record.id ]
-    end
-
-    # Whether `transaction` rolled back, on its own or with a transaction enclosing it, or was invalidated by a
-    # connection failure at commit.
-    def discarded?(transaction)
-      transaction.state.rolledback? || transaction.state.invalidated?
     end
 
     def triggers_for(klass)

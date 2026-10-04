@@ -44,10 +44,11 @@ RSpec.describe Watchtower::Observer do
 
     context "while Active Job enqueues Watchtower::Job after the transaction commits" do
       around do |example|
+        original = Watchtower::Job.enqueue_after_transaction_commit
         Watchtower::Job.enqueue_after_transaction_commit = true
         example.run
       ensure
-        Watchtower::Job.enqueue_after_transaction_commit = false
+        Watchtower::Job.enqueue_after_transaction_commit = original
       end
 
       it "raises for a queued trigger that fires at the save, whose job would wait for the commit" do
@@ -171,7 +172,7 @@ RSpec.describe Watchtower::Observer do
       end.not_to have_enqueued_job(Watchtower::Job)
     end
 
-    it "enqueues one job carrying every change to a row saved through two instances of it in one transaction" do
+    it "enqueues a job for each save, at the commit, including saves made through another instance of the row" do
       Author.watches(association: :books, callback: :reindex!)
       other = Author.create!(name: "Grace")
       first = Book.find(book.id)
@@ -181,14 +182,15 @@ RSpec.describe Watchtower::Observer do
       Book.transaction do
         first.update!(title: "Changed")
         second.update!(author: other)
+        expect(enqueued_jobs).to be_empty, "nothing is enqueued before the commit"
       end
 
-      jobs = enqueued_jobs.select { |job| job["job_class"] == "Watchtower::Job" }.map { |job| ActiveJob::Arguments.deserialize(job["arguments"]).first }
-      expect(jobs.size).to eq(1)
-      expect(jobs.first).to include(changed_attributes: a_collection_including("title", "author_id"), previous_foreign_keys: { "author_id" => author.id })
+      payloads = enqueued_jobs.select { |job| job["job_class"] == "Watchtower::Job" }.map { |job| ActiveJob::Arguments.deserialize(job["arguments"]).first }
+      expect(payloads.map { |payload| payload[:changed_attributes] }).to contain_exactly(a_collection_including("title"), a_collection_including("author_id"))
+      expect(payloads.pluck(:previous_foreign_keys).compact).to eq([ { "author_id" => author.id } ])
     end
 
-    it "enqueues one job for a record saved several times in one transaction, with the foreign keys from before the first save" do
+    it "keeps each save's previous foreign keys, so a record moved twice reaches the owner it passed through" do
       Author.watches(association: :books, callback: :reindex!)
       other = Author.create!(name: "Grace")
       third = Author.create!(name: "Hedy")
@@ -199,9 +201,24 @@ RSpec.describe Watchtower::Observer do
         book.update!(author: third)
       end
 
-      jobs = enqueued_jobs.select { |job| job["job_class"] == "Watchtower::Job" }
-      expect(jobs.size).to eq(1)
-      expect(Watchtower::Job).to have_been_enqueued.with(hash_including(record_id: book.id, previous_foreign_keys: { "author_id" => author.id }))
+      expect(enqueued_jobs.select { |job| job["job_class"] == "Watchtower::Job" }.size).to eq(2)
+      expect(Watchtower::Job).to have_been_enqueued.with(hash_including(previous_foreign_keys: { "author_id" => author.id }))
+      expect(Watchtower::Job).to have_been_enqueued.with(hash_including(previous_foreign_keys: { "author_id" => other.id }))
+    end
+
+    it "fires a save made while a committing transaction runs its callbacks with that save's own transaction" do
+      Author.watches(association: :books, callback: :reindex!)
+      other = Author.create!(name: "Grace")
+      third = Author.create!(name: "Hedy")
+      clear_enqueued_jobs
+
+      Book.transaction do
+        book.update!(author: other)
+        Book.current_transaction.after_commit { book.update!(author: third) }
+      end
+
+      expect(Watchtower::Job).to have_been_enqueued.with(hash_including(previous_foreign_keys: { "author_id" => author.id }))
+      expect(Watchtower::Job).to have_been_enqueued.with(hash_including(previous_foreign_keys: { "author_id" => other.id }))
     end
   end
 

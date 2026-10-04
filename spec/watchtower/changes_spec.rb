@@ -241,12 +241,12 @@ RSpec.describe "Watchtower triggers on saves, moves and destroys" do
       expect { Book.transaction { book.update!(title: "Changed") and raise ActiveRecord::Rollback } }.to reindexes_nothing(author)
     end
 
-    it "runs once, on the owners before and after the transaction, when a record moves twice" do
+    it "runs once per save at the commit, reaching every owner a record moved through" do
       third_author = Author.create!(name: "Barbara")
       book
 
       expect { Book.transaction { book.update!(author: other_author) and book.update!(author: third_author) } }
-        .to reindexes(author, third_author).and reindexes_nothing(other_author)
+        .to reindexes(author, other_author).and change { third_author.reload.reindex_count }.by(2)
     end
 
     it "runs on what an enclosing transaction commits when a savepoint within it rolls back" do
