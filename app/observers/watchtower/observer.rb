@@ -245,7 +245,8 @@ module Watchtower
     end
 
     # Queues `change` for the `queued` triggers that fire `at` and are enabled. The job runs the queued triggers that
-    # fire `at` and that the change reaches, except those whose keys it carries as suppressed: the ones disabled now.
+    # fire `at` and that the change reaches, except those whose keys it carries as suppressed, which are the ones
+    # disabled now.
     # Enqueues nothing when none of them is enabled.
     def enqueue(queued, at, changed_record, change)
       firing = queued.select { |trigger| trigger.at == at }

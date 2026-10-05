@@ -183,9 +183,6 @@ RSpec.describe "Watchtower triggers on saves, moves and destroys" do
       end
 
       it "runs on the owner of a destroyed record the association passes through first" do
-        Comment.where(commentable: review).delete_all
-        review.delete
-
         expect { book.destroy! }.to reindex(author)
       end
 
