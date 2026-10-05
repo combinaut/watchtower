@@ -1,6 +1,6 @@
 module Watchtower
-  # The change to a watched record, described relative to the owner a callback runs on: whether the record was added
-  # to that owner's association, removed from it, or changed within it, and where it came from or went to.
+  # The change to an associated record, described relative to the owner a callback runs on: whether the record was
+  # added to that owner's association, removed from it, or changed within it, and where it came from or went to.
   #
   # @!attribute kind
   #   @return [Symbol, nil] how the change affected the owner:
@@ -9,11 +9,11 @@ module Watchtower
   #     - `:changed`  the record was one of the owner's before the change and after it
   #     - `nil`       the previous owners cannot be known (`Audience#owners_before`)
   # @!attribute record
-  #   @return [ActiveRecord::Base, nil] the changed record; nil when a job runs after it was destroyed or deleted
+  #   @return [ActiveRecord::Base, nil] the associated record; nil when a job runs after it was destroyed or deleted
   # @!attribute record_class
-  #   @return [Class] the changed record's class
+  #   @return [Class] the associated record's class
   # @!attribute record_id
-  #   @return [Object] the changed record's id
+  #   @return [Object] the associated record's id
   # @!attribute destroyed
   #   @return [Boolean] whether the record was destroyed (also `destroyed?`)
   # @!attribute changed_attributes
