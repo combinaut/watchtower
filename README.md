@@ -100,7 +100,7 @@ book.update!(title: "Persuasion", genre: "Novel")  # reindexes the book's author
 
 ### Knowing what changed
 
-A callback that takes the change as well as the owner is given a `Watchtower::OwnerChange`, describing the change as that owner sees it. A method takes it as a required argument, and a proc as its second parameter. A callback without one is called with the owner alone.
+The callback is offered the owner and the change, a `Watchtower::OwnerChange` describing how the change affected that owner. A proc receives both, and a method on the owner receives the change as its argument.
 
 ```ruby
 class Author < ApplicationRecord
@@ -119,9 +119,9 @@ end
 
 | Method | Value |
 | --- | --- |
-| `kind` | `:added` when the record became one of the owner's, `:removed` when it stopped being one (including by being destroyed), `:changed` when it was one before and after, or `nil` when its previous owners cannot be known |
-| `record` | the changed record; `nil` when a job runs after it was destroyed or deleted |
-| `record_class`, `record_id` | the changed record's class and id |
+| `kind` | `:added` when the record was added to the owner's association<br>`:removed` when it was removed from it, including by being destroyed<br>`:changed` when it changed while staying in it<br>`nil` when its previous owners cannot be known |
+| `record` | the associated record; `nil` when a job runs after it was destroyed or deleted |
+| `record_class`, `record_id` | the associated record's class and id |
 | `destroyed?` | whether the record was destroyed |
 | `changed_attributes` | the attributes the change saved; empty for a destroy, unless a trigger that fires at the commit merged it with an earlier save |
 | `previous_owners` | the owners before the change, as a relation, which for an added record says where it came from; `nil` when they cannot be known |
@@ -129,7 +129,7 @@ end
 
 A trigger that fires at the commit describes the transaction's changes merged into one, so a book moved from Ada to Grace to Hedy tells Ada it was removed, with Hedy as its owner, and tells Hedy it was added, with Ada as its previous owner. The callback does not run on Grace, who held the book only inside the transaction. A trigger that fires `at: :save` describes each step.
 
-What an owner can be told depends on the kind of watch:
+What an owner can be told depends on the kind of watch.
 
 | Watch | Declaration | `kind` | `previous_owners` / `owners` |
 | --- | --- | --- | --- |
@@ -142,7 +142,7 @@ What an owner can be told depends on the kind of watch:
 | The owner `belongs_to` the watched record | on `Book`: `belongs_to :author`<br>`watches association: :author, callback: :author_changed` | `:changed`; `:removed` when the author is destroyed⁴ | before: the books that point at the author; after: the same books, or none once the author is destroyed |
 
 1. A change can come from the record the association passes through. When a `Book` moves from Ada to Grace, Ada loses the book's reviews and Grace gains them, and `change.record` is the `Book`, not a review.
-2. When the association's source is itself a `has_many :through`, as here where `Book` has `has_many :review_comments, through: :reviews, source: :comments`, the changed record holds no foreign key that Watchtower reads to find its owners. Watchtower then treats a change to any of the record's own `belongs_to` foreign keys as a possible move, and leaves its previous owners unknown. Destroying such a record runs no callback, since neither its previous owners nor its current ones can be read (see [Caveats](#caveats)).
+2. When the association's source is itself a `has_many :through`, as here where `Book` has `has_many :review_comments, through: :reviews, source: :comments`, the associated record holds no foreign key that Watchtower reads to find its owners. Watchtower then treats a change to any of the record's own `belongs_to` foreign keys as a possible move, and leaves its previous owners unknown. Destroying such a record runs no callback, since neither its previous owners nor its current ones can be read (see [Caveats](#caveats)).
 3. An `affects:` scope may select owners by anything, so Watchtower cannot tell which owners a change added or removed. A destroy's owners are read before the record is gone.
 4. Saving an `Author` does not change which books point at it, so it neither adds nor removes any.
 5. A scope can take in or leave out a record without any key changing, as when a book is published, so Watchtower cannot tell which owners gained or lost it. This applies wherever a scope appears along the association, including on an association it passes through.
