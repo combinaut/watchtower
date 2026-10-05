@@ -3,11 +3,13 @@ RSpec.describe "Watchtower triggers on saves, moves and destroys" do
   let(:other_author) { Author.create!(name: "Grace") }
   let(:book) { Book.create!(author: author, title: "Original") }
 
-  def reindexes(*authors)
-    authors.map { |each| change { each.reload.reindex_count }.by(1) }.reduce(:and)
+  # Matches a block that reindexes each of `authors` `times` times, as `expect { ... }.to reindex(author)`.
+  def reindex(*authors, times: 1)
+    authors.map { |each| change { each.reload.reindex_count }.by(times) }.reduce(:and)
   end
 
-  def reindexes_nothing(*authors)
+  # Matches a block that reindexes none of `authors`.
+  def not_reindex(*authors)
     authors.map { |each| not_change { each.reload.reindex_count } }.reduce(:and)
   end
 
@@ -29,12 +31,12 @@ RSpec.describe "Watchtower triggers on saves, moves and destroys" do
 
       it "runs on the owner of a destroyed record" do
         book
-        expect { book.destroy! }.to reindexes(author)
+        expect { book.destroy! }.to reindex(author)
       end
 
       it "runs on the owners a record moves between" do
         book
-        expect { book.update!(author: other_author) }.to reindexes(author, other_author)
+        expect { book.update!(author: other_author) }.to reindex(author, other_author)
       end
     end
 
@@ -42,7 +44,7 @@ RSpec.describe "Watchtower triggers on saves, moves and destroys" do
       Author.watches(association: :books, attribute: :title, callback: :reindex!)
       book
 
-      expect { book.update!(author: other_author) }.to reindexes(author, other_author)
+      expect { book.update!(author: other_author) }.to reindex(author, other_author)
     end
 
     it "reads no more in the saving thread than a save without the trigger" do
@@ -61,24 +63,24 @@ RSpec.describe "Watchtower triggers on saves, moves and destroys" do
 
       it "runs on the owner of a destroyed record" do
         review
-        expect { review.destroy! }.to reindexes(author)
+        expect { review.destroy! }.to reindex(author)
       end
 
       it "runs on the owners a record moves between" do
         review
         other_book = Book.create!(author: other_author, title: "Other")
 
-        expect { review.update!(book: other_book) }.to reindexes(author, other_author)
+        expect { review.update!(book: other_book) }.to reindex(author, other_author)
       end
 
       it "runs on the owners the record it passes through moves between" do
         review
-        expect { book.update!(author: other_author) }.to reindexes(author, other_author)
+        expect { book.update!(author: other_author) }.to reindex(author, other_author)
       end
 
       it "does not run on another change to the record it passes through" do
         review
-        expect { book.update!(title: "Renamed") }.to reindexes_nothing(author)
+        expect { book.update!(title: "Renamed") }.to not_reindex(author)
       end
     end
 
@@ -89,12 +91,12 @@ RSpec.describe "Watchtower triggers on saves, moves and destroys" do
 
       it "runs on the owners of a destroyed record" do
         book.update!(publisher: publisher)
-        expect { publisher.destroy! }.to reindexes(author)
+        expect { publisher.destroy! }.to reindex(author)
       end
 
       it "runs when the record it passes through changes the key" do
         book
-        expect { book.update!(publisher: publisher) }.to reindexes(author)
+        expect { book.update!(publisher: publisher) }.to reindex(author)
       end
     end
 
@@ -103,7 +105,7 @@ RSpec.describe "Watchtower triggers on saves, moves and destroys" do
 
       it "runs on the owner a record moves away from to another type" do
         comment = Comment.create!(commentable: author, body: "Hi")
-        expect { comment.update!(commentable: book) }.to reindexes(author)
+        expect { comment.update!(commentable: book) }.to reindex(author)
       end
 
       it "does not run on an owner of another type that shares the key" do
@@ -111,7 +113,7 @@ RSpec.describe "Watchtower triggers on saves, moves and destroys" do
         Author.where(id: comment.commentable_id).first_or_create!(name: "Shares the id")
         owner = Author.find(comment.commentable_id)
 
-        expect { comment.destroy! }.to reindexes_nothing(owner)
+        expect { comment.destroy! }.to not_reindex(owner)
       end
     end
 
@@ -119,7 +121,7 @@ RSpec.describe "Watchtower triggers on saves, moves and destroys" do
       Author.watches(class: "Book", affects: ->(changed) { Author.where(id: changed.author_id) }, callback: :reindex!)
       book
 
-      expect { book.destroy! }.to reindexes(author)
+      expect { book.destroy! }.to reindex(author)
     end
 
     it "watches the record it passes through for a trigger declared before the association, once the observer reinitializes" do
@@ -137,7 +139,7 @@ RSpec.describe "Watchtower triggers on saves, moves and destroys" do
       Watchtower::Observer.reinitialize
       Review.create!(book: book, rating: 5)
 
-      expect { book.update!(author: other_author) }.to reindexes(author, other_author)
+      expect { book.update!(author: other_author) }.to reindex(author, other_author)
     end
 
     it "does not run a trigger on one subclass for a destroyed record of a sibling subclass" do
@@ -145,7 +147,7 @@ RSpec.describe "Watchtower triggers on saves, moves and destroys" do
       Author.watches(association: :novels, callback: :reindex!)
       poem = Poem.create!(author: author, title: "Ode")
 
-      expect { poem.destroy! }.to reindexes_nothing(author)
+      expect { poem.destroy! }.to not_reindex(author)
     end
 
     context "on an association through a polymorphic source" do
@@ -156,7 +158,49 @@ RSpec.describe "Watchtower triggers on saves, moves and destroys" do
         Mention.create!(author: author, subject: mentioned)
         Mention.create!(author: other_author, subject: Publisher.create!(id: 500, name: "Same id"))
 
-        expect { mentioned.destroy! }.to reindexes(author).and reindexes_nothing(other_author)
+        expect { mentioned.destroy! }.to reindex(author).and not_reindex(other_author)
+      end
+    end
+
+    # The association's source, `Book#review_comments`, is itself a `has_many :through` the reviews. Watchtower
+    # watches the comments and the books, but not the reviews inside the source.
+    context "on an association whose source is itself an association through another" do
+      let(:other_book) { Book.create!(author: other_author, title: "Other") }
+      let(:review) { Review.create!(book: book, rating: 5) }
+      let!(:comment) { Comment.create!(commentable: review, body: "Original") }
+
+      before do
+        other_book
+        Author.watches(association: :review_comments, callback: :reindex!)
+      end
+
+      it "runs on the owner of a changed record" do
+        expect { comment.update!(body: "Changed") }.to reindex(author).and not_reindex(other_author)
+      end
+
+      it "runs on the owners before and after a move of the record the association passes through first" do
+        expect { book.update!(author: other_author) }.to reindex(author, other_author)
+      end
+
+      it "runs on the owner of a destroyed record the association passes through first" do
+        expect { book.destroy! }.to reindex(author)
+      end
+
+      it "runs only on the new owner of a moved record" do
+        other_review = Review.create!(book: other_book, rating: 1)
+
+        expect { comment.update!(commentable: other_review) }.to reindex(other_author).and not_reindex(author)
+      end
+
+      it "runs on no owner of a destroyed record" do
+        expect { comment.destroy! }.to not_reindex(author, other_author)
+      end
+
+      it "runs on no owner when a record inside the source moves or is destroyed" do
+        aggregate_failures do
+          expect { review.update!(book: other_book) }.to not_reindex(author, other_author)
+          expect { review.destroy! }.to not_reindex(author, other_author)
+        end
       end
     end
 
@@ -165,7 +209,7 @@ RSpec.describe "Watchtower triggers on saves, moves and destroys" do
       Author.watches(association: :books, callback: :reindex!, around: ->(&callbacks) { callbacks.call })
       book
 
-      expect { book.update!(title: "Renamed") }.to reindexes(author)
+      expect { book.update!(title: "Renamed") }.to reindex(author)
     end
 
     it "runs a callback once per owner when several triggers reach it" do
@@ -173,7 +217,7 @@ RSpec.describe "Watchtower triggers on saves, moves and destroys" do
       Author.watches(association: :books, attribute: :genre, callback: :reindex!)
       book
 
-      expect { book.update!(title: "Renamed", genre: "Poetry") }.to reindexes(author)
+      expect { book.update!(title: "Renamed", genre: "Poetry") }.to reindex(author)
     end
   end
 
@@ -228,25 +272,25 @@ RSpec.describe "Watchtower triggers on saves, moves and destroys" do
 
     it "runs in the saving thread and queues no job" do
       book
-      expect { book.update!(title: "Changed") }.to reindexes(author).and not_have_enqueued_job(Watchtower::Job)
+      expect { book.update!(title: "Changed") }.to reindex(author).and not_have_enqueued_job(Watchtower::Job)
     end
 
     it "runs on the owner of a destroyed record" do
       book
-      expect { book.destroy! }.to reindexes(author)
+      expect { book.destroy! }.to reindex(author)
     end
 
     it "does not run when the transaction rolls back" do
       book
-      expect { Book.transaction { book.update!(title: "Changed") and raise ActiveRecord::Rollback } }.to reindexes_nothing(author)
+      expect { Book.transaction { book.update!(title: "Changed") and raise ActiveRecord::Rollback } }.to not_reindex(author)
     end
 
-    it "runs once, on the owners before and after the transaction, when a record moves twice" do
+    it "runs once at the commit, on the owners before and after the transaction, when a record moves twice" do
       third_author = Author.create!(name: "Barbara")
       book
 
       expect { Book.transaction { book.update!(author: other_author) and book.update!(author: third_author) } }
-        .to reindexes(author, third_author).and reindexes_nothing(other_author)
+        .to reindex(author, third_author).and not_reindex(other_author)
     end
 
     it "runs on what an enclosing transaction commits when a savepoint within it rolls back" do
@@ -260,7 +304,7 @@ RSpec.describe "Watchtower triggers on saves, moves and destroys" do
             raise ActiveRecord::Rollback
           end
         end
-      end.to reindexes(author)
+      end.to reindex(author)
     end
 
     it "does not run while its enabled predicate is false at the commit, though it was true at the save" do
@@ -268,7 +312,7 @@ RSpec.describe "Watchtower triggers on saves, moves and destroys" do
       Author.watches(association: :reviews, callback: :reindex!, inline: true, enabled: -> { enabled })
       review = Review.create!(book: book, rating: 5)
 
-      expect { Review.transaction { review.update!(rating: 4) and enabled = false } }.to reindexes_nothing(author)
+      expect { Review.transaction { review.update!(rating: 4) and enabled = false } }.to not_reindex(author)
     end
   end
 end

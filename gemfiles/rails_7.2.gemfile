@@ -6,7 +6,7 @@ gem "puma"
 gem "sqlite3"
 gem "rubocop-rails-omakase", require: false
 gem "appraisal", group: :development
-gem "rails", "~> 6.1"
+gem "rails", "~> 7.2.0"
 
 group :development, :test do
   gem "rspec-rails"

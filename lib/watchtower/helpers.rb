@@ -22,5 +22,28 @@ module Watchtower
         raise "Unhandled callable #{callable.inspect}"
       end
     end
+
+    # Whether a trigger's `callback` takes the change (`Watchtower::OwnerChange`) as well as the record of `klass` it
+    # runs on: a `Proc` with a second positional parameter, or a method with a required positional parameter. A
+    # method whose parameters are all optional, such as `touch`, or that `klass` does not define, such as one
+    # `method_missing` answers, is sent to the record with no argument.
+    def self.callback_wants_change?(callback, klass)
+      parameters =
+        case callback
+        when Proc then callback.parameters.drop(1)
+        when Symbol, String
+          return false unless klass.method_defined?(callback) || klass.private_method_defined?(callback)
+
+          klass.instance_method(callback).parameters
+        else return false
+        end
+      callback.is_a?(Proc) ? parameters.any? { |type, _| %i[req opt rest].include?(type) } : parameters.any? { |type, _| type == :req }
+    end
+
+    # Calls a trigger's `callback` on `receiver` with `change`: a `Proc` is called with both, and a method is sent to
+    # `receiver` with `change`.
+    def self.evaluate_with_change(callback, receiver, change)
+      callback.is_a?(Proc) ? callback.call(receiver, change) : receiver.send(callback, change)
+    end
   end
 end

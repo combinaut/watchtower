@@ -74,6 +74,24 @@ RSpec.describe Watchtower::Job do
     end
   end
 
+  describe "firing point" do
+    it "runs only the triggers that fire at the point it was enqueued for" do
+      Author.watches(association: :books, callback: :reindex!, at: :save)
+
+      aggregate_failures do
+        expect { perform(book, at: :save) }.to change { author.reload.reindex_count }.by(1)
+        expect { perform(book, at: :commit) }.not_to(change { author.reload.reindex_count })
+      end
+    end
+
+    it "runs the commit-time triggers for a job enqueued without a firing point" do
+      Author.watches(association: :books, callback: :reindex!, at: :save)
+      Author.watches(association: :books, callback: :touch)
+
+      expect { perform(book) }.not_to(change { author.reload.reindex_count })
+    end
+  end
+
   describe "suppressed triggers" do
     it "skips a trigger whose key is in suppressed_trigger_keys" do
       Author.watches(association: :books, callback: :reindex!)

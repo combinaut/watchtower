@@ -15,6 +15,29 @@ module Watchtower
       [ current(change), previous_owners(change) ].compact
     end
 
+    # The owners the record has after the change: none once it is destroyed, or, unless the owners `belongs_to` it,
+    # once it can no longer be loaded.
+    def owners_after(change)
+      return observing_class.none if change.destroyed
+
+      current(change) || observing_class.none
+    end
+
+    # The owners the record had before the change: for a destroy or a move, its previous owners, and otherwise the
+    # owners it has after the change. Nil when they cannot be known:
+    #   - a scoped association, whose scope can take in or leave out the record without any key changing
+    #   - an `affects:` scope, on anything but a destroy
+    #   - through an association whose source is itself a `has_many :through`, a change to one of the record's own
+    #     `belongs_to` foreign keys
+    def owners_before(change)
+      return nil if scoped?
+      return previous_owners(change) || current(change) || observing_class.none if change.destroyed
+      return previous_owners(change) || observing_class.none if moved?(change)
+      return nil if possibly_moved?(change)
+
+      owners_after(change)
+    end
+
     private
 
     def observing_class
@@ -23,6 +46,26 @@ module Watchtower
 
     def reflection
       @watch.reflection
+    end
+
+    def moved?(change)
+      @watch.foreign_key_attributes.intersect?(change.changed_attributes)
+    end
+
+    def scoped?
+      reflection&.chain&.any?(&:scope)
+    end
+
+    def possibly_moved?(change)
+      return true unless reflection
+      return false if reflection.belongs_to? || @watch.foreign_key_reflection
+      # Through a `belongs_to` source, the record an association passes through holds the key, so the watched record
+      # cannot move by changing its own.
+      return false if reflection.source_reflection.belongs_to? && !reflection.source_reflection.through_reflection?
+
+      record_class = change.record_type.constantize
+      foreign_keys = record_class.reflect_on_all_associations(:belongs_to).flat_map { |each| [ each.foreign_key.to_s, each.foreign_type&.to_s ] }.compact
+      foreign_keys.intersect?(change.changed_attributes)
     end
 
     def current(change)
