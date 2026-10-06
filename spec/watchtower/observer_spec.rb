@@ -159,6 +159,25 @@ RSpec.describe Watchtower::Observer do
           .with(hash_including(suppressed_trigger_keys: [ a_string_starting_with("Author/reindex!/books/enabled:") ]))
       end
 
+      it "enqueues nothing when the only save that enabled it rolled back in a savepoint" do
+        Author.watches(association: :books, callback: :reindex!, enabled: -> { Thread.current[:watchtower_spec_enabled] == true })
+        clear_enqueued_jobs
+
+        expect do
+          Book.transaction do
+            book.update!(title: "Outer")
+            Book.transaction(requires_new: true) do
+              Thread.current[:watchtower_spec_enabled] = true
+              book.update!(title: "Inner")
+              Thread.current[:watchtower_spec_enabled] = false
+              raise ActiveRecord::Rollback
+            end
+          end
+        end.not_to have_enqueued_job(Watchtower::Job)
+      ensure
+        Thread.current[:watchtower_spec_enabled] = nil
+      end
+
       it "reads the predicate when the change is saved, not when it commits" do
         Author.watches(association: :books, callback: :reindex!, enabled: -> { Thread.current[:watchtower_spec_enabled] == true })
         clear_enqueued_jobs
