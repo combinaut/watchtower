@@ -142,6 +142,13 @@ RSpec.describe "Watchtower triggers on saves, moves and destroys" do
       expect { book.update!(author: other_author) }.to reindex(author, other_author)
     end
 
+    it "runs a trigger on a subclass for a saved record of that subclass" do
+      Author.watches(association: :novels, callback: :reindex!)
+      novel = Novel.create!(author: author, title: "Draft")
+
+      expect { novel.update!(title: "Final") }.to reindex(author)
+    end
+
     it "does not run a trigger on one subclass for a destroyed record of a sibling subclass" do
       Author.watches(association: :books, callback: ->(_author) { })
       Author.watches(association: :novels, callback: :reindex!)
@@ -307,12 +314,44 @@ RSpec.describe "Watchtower triggers on saves, moves and destroys" do
       end.to reindex(author)
     end
 
-    it "does not run while its enabled predicate is false at the commit, though it was true at the save" do
+    it "runs when its enabled predicate was true at the save, though it is false at the commit" do
       enabled = true
       Author.watches(association: :reviews, callback: :reindex!, inline: true, enabled: -> { enabled })
       review = Review.create!(book: book, rating: 5)
 
-      expect { Review.transaction { review.update!(rating: 4) and enabled = false } }.to not_reindex(author)
+      expect { Review.transaction { review.update!(rating: 4) and enabled = false } }.to reindex(author)
+    ensure
+      enabled = true
+    end
+
+    it "does not run when its enabled predicate was false at the save, though it is true at the commit" do
+      enabled = true
+      Author.watches(association: :reviews, callback: :reindex!, inline: true, enabled: -> { enabled })
+      review = Review.create!(book: book, rating: 5)
+
+      expect do
+        Review.transaction do
+          enabled = false
+          review.update!(rating: 4)
+          enabled = true
+        end
+      end.to not_reindex(author)
+    end
+
+    it "runs when any save of the record in the transaction enabled it" do
+      enabled = true
+      Author.watches(association: :reviews, callback: :reindex!, inline: true, enabled: -> { enabled })
+      review = Review.create!(book: book, rating: 5)
+
+      expect do
+        Review.transaction do
+          review.update!(rating: 4)
+          enabled = false
+          Review.find(review.id).update!(rating: 3)
+        end
+      end.to reindex(author)
+    ensure
+      enabled = true
     end
   end
 end

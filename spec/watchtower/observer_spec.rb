@@ -152,7 +152,7 @@ RSpec.describe Watchtower::Observer do
           .with(hash_including(suppressed_trigger_keys: [ a_string_starting_with("Author/reindex!/books/enabled:") ]))
       end
 
-      it "reads the predicate when the change commits, not when it is saved" do
+      it "reads the predicate when the change is saved, not when it commits" do
         Author.watches(association: :books, callback: :reindex!, enabled: -> { Thread.current[:watchtower_spec_enabled] == true })
         clear_enqueued_jobs
 
@@ -162,7 +162,7 @@ RSpec.describe Watchtower::Observer do
             book.update!(title: "Changed")
             Thread.current[:watchtower_spec_enabled] = true
           end
-        end.to have_enqueued_job(Watchtower::Job)
+        end.not_to have_enqueued_job(Watchtower::Job)
       ensure
         Thread.current[:watchtower_spec_enabled] = nil
       end

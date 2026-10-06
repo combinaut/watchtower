@@ -19,7 +19,7 @@ A trigger can also:
 
 - run its callback in a background job, or inline in the thread that made the change (see [Running inline](#running-inline))
 - run once when the transaction commits, for all of a record's changes combined, or once for each save (see [Choosing when a trigger fires](#choosing-when-a-trigger-fires))
-- be switched off for the extent of a block, with a predicate read when it fires (see [Gating triggers](#gating-triggers))
+- be switched off for the changes made inside a block, with a predicate read as each change is made (see [Gating triggers](#gating-triggers))
 - wrap all the callbacks of one change in a block (see [Wrapping the callbacks](#wrapping-the-callbacks))
 - tell its callback whether the associated record was added, changed or removed, and where it came from or went to (see [Knowing what changed](#knowing-what-changed))
 
@@ -190,7 +190,7 @@ A block inside the callback would instead open and send a batch for every owner.
 
 ## Choosing when a trigger fires
 
-`at:` sets when a trigger fires, and with it when its `enabled:` is read.
+`at:` sets when a trigger fires.
 
 - **`at: :commit` converges** on the committed state. The trigger fires once the transaction commits, once for each associated record the transaction added, changed or removed, on the owners the record had before the transaction and the owners it has after. Anything in between is skipped, and a change that rolls back fires nothing.
 - **`at: :save` follows every step.** The trigger fires as each save or destroy happens, inside the transaction, on the owners the record had before that save and the owners it has when the callback runs.
@@ -211,7 +211,7 @@ An associated record can have several owners, e.g. a publisher belongs to every 
 watches association: :books, callback: :reindex!
 ```
 
-**Inline, `at: :commit`.** Best for work that the code making the changes collects and finishes itself. A script that rewrites many books opens a batch, the callbacks add each affected author to it, and the script reindexes each author once when it finishes. The callback runs in the script's thread, where it can reach the batch, and only for changes that committed.
+**Inline, `at: :commit`.** Best for work that the code making the changes collects and finishes itself. A script that rewrites many books opens a batch, the callbacks add each affected author to it, and the script reindexes each author once when it finishes. The callback runs in the script's thread, where it can reach the batch, and only for changes that committed. A book saved while the batch is open but committed after the script closes it still fires the callback, so the callback reindexes the author itself when no batch is open (see [Gating triggers](#gating-triggers)).
 
 ```ruby
 watches association: :books, callback: :add_to_reindex_batch, inline: true, enabled: -> { ReindexBatch.open? }
@@ -251,7 +251,7 @@ A trigger that fires at the commit fires once for each associated record the tra
 
 ## Gating triggers
 
-`enabled:` switches a specific trigger off for the dynamic extent of a block, e.g. around a bulk operation that would otherwise fire the callback for every row it touches, when a single batch recompute or a periodic full rebuild is cheaper.
+`enabled:` switches a specific trigger off for the changes made inside a block, e.g. around a bulk operation that would otherwise fire the callback for every row it touches, when a single batch recompute or a periodic full rebuild is cheaper.
 
 ```ruby
 class Author < ApplicationRecord
@@ -263,12 +263,13 @@ Reindexing.without { Book.find_each { |book| book.update!(title: book.title.stri
 Author.find_each(&:reindex!)
 ```
 
-A queued trigger's callback runs in a job, after a thread-local set inside the block is gone. Watchtower therefore evaluates `enabled:` **when the trigger fires, in the thread that made the change**, i.e. as the change commits, or for an `at: :save` trigger as the record saves, and carries a queued trigger's decision into the job.
+Watchtower evaluates `enabled:` **as each change is made, in the thread that made it**, while a thread-local set inside the block is still live, and keeps the decision until the trigger fires.
 
-- The observer evaluates each matching trigger's `enabled:` predicate as it fires. It runs the inline triggers that pass, and enqueues the queued triggers that pass, recording the other queued triggers' keys in the job payload as suppressed. If no matching queued trigger passes, no job is enqueued at all.
-- The job honors that recorded decision; it does not re-evaluate the predicate.
+- An `at: :commit` trigger fires for an associated record when any of the transaction's changes to it enabled the trigger. A change made inside the block stays gated off even when the transaction commits after the block. A transaction that changes the associated record both inside and outside the block fires the trigger once.
+- The observer runs the inline triggers that were enabled, and enqueues the queued triggers that were enabled, recording the other queued triggers' keys in the job payload as suppressed. If none of the queued triggers was enabled, no job is enqueued at all.
+- The job honors that recorded decision. It does not re-evaluate the predicate.
 
-So a trigger gated off inside a block stays off for changes that fire in that block, while other triggers on the same record (e.g. a different model's `watches` on the same class) are unaffected. A block opened inside a transaction does not cover the transaction's commit, so a change saved in the block and committed after it is gated by the context at the commit, unless its trigger fires `at: :save`. Triggers without `enabled:` are always enabled.
+So a trigger gated off inside a block stays off for the changes made in that block, while other triggers on the same record (e.g. a different model's `watches` on the same class) are unaffected. A trigger that a block enables, e.g. `enabled: -> { ReindexBatch.open? }`, fires after the block has ended when the transaction commits after it, so its callback handles the block being closed. Triggers without `enabled:` are always enabled.
 
 A predicate may be a no-arg `Proc` (a context check, as above), a one-arg `Proc` (passed the associated record, for per-record gating), or a `Symbol`/`String` sent to the associated record (e.g. `enabled: :indexable?`).
 
