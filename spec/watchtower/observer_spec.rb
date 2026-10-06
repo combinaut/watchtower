@@ -216,7 +216,7 @@ RSpec.describe Watchtower::Observer do
       expect(Book.connection.instance_variable_get(:@watchtower_held_changes)).to be_blank
     end
 
-    it "enqueues one job for a record saved several times in one transaction, with the owner from before the first save" do
+    it "enqueues one job for a record saved several times in one transaction, with the watcher from before the first save" do
       Author.watches(association: :books, callback: :reindex!)
       other = Author.create!(name: "Grace")
       third = Author.create!(name: "Hedy")

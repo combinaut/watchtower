@@ -12,8 +12,8 @@ RSpec.describe Watchtower::Job do
     )
   end
 
-  describe "audience resolution" do
-    it "runs the callback on owners reached through the trigger association" do
+  describe "finding the watchers" do
+    it "runs the callback on watchers reached through the trigger association" do
       Author.watches(association: :books, callback: :reindex!)
       expect { perform(book) }.to change { author.reload.reindex_count }.by(1)
     end
@@ -23,8 +23,17 @@ RSpec.describe Watchtower::Job do
       expect { perform(book) }.to change { author.reload.reindex_count }.by(1)
     end
 
-    it "supports a proc callback invoked with the owner" do
-      Author.watches(association: :books, callback: ->(owner) { owner.reindex! })
+    it "reads the `affects:` watchers of a destroyed record from a job an earlier version enqueued" do
+      Author.watches(class: "Book", affects: ->(changed) { Author.where(id: changed.author_id) }, callback: :reindex!)
+      key = Watchtower::Observer.triggers.last.key
+      book.delete
+
+      expect { perform(book, destroyed: true, changed_attributes: [], previous_owner_ids: { key => [ author.id ] }) }
+        .to change { author.reload.reindex_count }.by(1)
+    end
+
+    it "supports a proc callback invoked with the watcher" do
+      Author.watches(association: :books, callback: ->(watcher) { watcher.reindex! })
       expect { perform(book) }.to change { author.reload.reindex_count }.by(1)
     end
 

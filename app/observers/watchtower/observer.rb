@@ -132,7 +132,7 @@ module Watchtower
       end
     end
 
-    # One class a trigger observes, and how a change to one of its records reaches the trigger's audience.
+    # One class a trigger observes, and how a change to one of its records reaches the trigger's watchers.
     #
     # @!attribute klass
     #   @return [Class] the observed class
@@ -154,7 +154,7 @@ module Watchtower
         self[:reflection] || (association && observing_class.reflect_on_association(association))
       end
 
-      # The association whose `foreign_key` the watched record holds, pointing at the record the audience is found
+      # The association whose `foreign_key` the watched record holds, pointing at the record the watchers are found
       # through, or nil when the watched record holds no such key.
       def foreign_key_reflection
         return nil unless reflection
@@ -210,7 +210,7 @@ module Watchtower
       if at_commit.any?
         enabled = []
         # Held before the predicates are read, so a change a predicate saves to the same row is held after this one
-        # and the merged change keeps this one's previous owners.
+        # and the merged change keeps this one's previous watchers.
         hold_for_commit(changed_record, change, enabled)
         enabled.concat(enabled_triggers(at_commit, changed_record).map(&:declaration))
       end
@@ -250,7 +250,7 @@ module Watchtower
     end
 
     # Fires the `at: :commit` triggers once for each row the held changes touch, on that row's changes merged into
-    # one: every attribute they changed, and the owners the row had before the earliest of them (`Change#merge`). A
+    # one: every attribute they changed, and the watchers the row had before the earliest of them (`Change#merge`). A
     # trigger fires when any of the row's held changes enabled it. The held changes are taken before anything fires,
     # so a change a callback makes is held for its own transaction's commit. Every save in a transaction registers a
     # flush, and the first to run takes every held change, so the rest find none.

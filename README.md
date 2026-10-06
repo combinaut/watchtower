@@ -2,7 +2,7 @@
 
 Run a callback on a record whenever one of its associated records is added, changed or removed.
 
-Models often keep state derived from their associations. That state goes out of date when an associated record is **added** to the association (created in it or moved into it), **changed** while it stays in it, or **removed** from it (moved to another owner or destroyed). Watchtower lets the owner declare that dependency once, and runs the callback that brings the owner up to date whenever one of those changes happens.
+Models often keep state derived from their associations. That state goes out of date when an associated record is **added** to the association (created in it or moved into it), **changed** while it stays in it, or **removed** from it (moved to another record or destroyed). Watchtower lets the model declare that dependency once with `watches`, and runs the callback that brings each affected record, a **watcher**, up to date whenever one of those changes happens.
 
 ```ruby
 class Author < ApplicationRecord
@@ -13,7 +13,7 @@ class Author < ApplicationRecord
 end
 ```
 
-If you are looking to react to a record's own changes, its own callbacks will serve you better. Watchtower is for the owners on the other side of an association.
+If you are looking to react to a record's own changes, its own callbacks will serve you better. Watchtower is for the records on the other side of an association, the ones whose model declares `watches`.
 
 A trigger can also:
 
@@ -26,8 +26,8 @@ A trigger can also:
 ## How it works
 
 1. `watches(...)` registers a **trigger**, and tells Watchtower to observe the records of the association it names (`association:`), or the class an `affects:` scope reads (`class:`).
-2. When one of those records is added, changed or removed, an [`ActiveRecord::Observer`](https://github.com/rails/rails-observers) hook records the change (the associated record's class, id and changed attributes, and the foreign keys that tied it to its owners before it moved or was destroyed). By default Watchtower combines a transaction's changes to a record and runs the callback once the transaction commits. A trigger can instead run one callback for each save (see [Choosing when a trigger fires](#choosing-when-a-trigger-fires)).
-3. Watchtower finds the **audience**, the owners the change affects, and runs the callback on each.
+2. When one of those records is added, changed or removed, an [`ActiveRecord::Observer`](https://github.com/rails/rails-observers) hook records the change (the associated record's class, id and changed attributes, and the foreign keys that tied it to its watchers before it moved or was destroyed). By default Watchtower combines a transaction's changes to a record and runs the callback once the transaction commits. A trigger can instead run one callback for each save (see [Choosing when a trigger fires](#choosing-when-a-trigger-fires)).
+3. Watchtower finds the **watchers** the change reaches, the records whose model declared the trigger, and runs the callback on each.
 
 ## Installation
 
@@ -65,33 +65,41 @@ end
 
 | Option | Description |
 | --- | --- |
-| `association:` | A `has_many` / `belongs_to` on the observing model. When one of its records is added, changed or removed, the owners it reaches are the audience. |
-| `affects:` | An alternative to `association:`, a `Proc` (given the associated record) or method name returning the relation of owners to run on. Use it when the audience can't be expressed as a single association join. Requires `class:`. |
+| `association:` | A `has_many` / `belongs_to` on the observing model. When one of its records is added, changed or removed, Watchtower runs the callback on the watchers the change reaches. |
+| `affects:` | An alternative to `association:`, a `Proc` (given the associated record) or method name returning the relation of watchers to run on. Use it when the watchers can't be reached by a single association join. Requires `class:`. |
 | `class:` | The observed class. Inferred from `association:`. Give it when using `affects:`, or when the association isn't defined yet at declaration time. |
-| `callback:` | What to run on each owner in the audience. A `Symbol`/`String` is sent to the owner; a `Proc` is called (passed the owner if it takes an argument). It is also offered the change (see [Knowing what changed](#knowing-what-changed)). |
+| `callback:` | What to run on each watcher a change reaches. A `Symbol`/`String` is sent to the watcher; a `Proc` is called (passed the watcher if it takes an argument). It is also offered the change (see [Knowing what changed](#knowing-what-changed)). |
 | `attribute:` / `attributes:` | Fire for a changed associated record only when one of these attributes changed. An added or removed record always fires. Omit to fire on any change. |
-| `includes:` | Associations to eager-load on the audience before running the callback (avoids N+1 in the callback). |
+| `includes:` | Associations to eager-load on the watchers before running the callback (avoids N+1 in the callback). |
 | `enabled:` | Whether Watchtower runs the callback for a change, read as the change is made (see [Gating triggers](#gating-triggers)). Defaults to always running it. |
 | `at:` | When the trigger fires, `:commit` once the transaction commits or `:save` at each save (see [Choosing when a trigger fires](#choosing-when-a-trigger-fires)). Defaults to `:commit`. |
 | `inline:` | Run the callback in the thread that made the change instead of in a job (see [Running inline](#running-inline)). Defaults to `false`. |
 | `around:` | A `Proc` that wraps all the callbacks one change runs, e.g. in a transaction (see [Wrapping the callbacks](#wrapping-the-callbacks)). |
 
-### Audience: `association:` vs `affects:`
+### Finding the watchers: `association:` vs `affects:`
 
-With `association:`, Watchtower finds owners by joining that association to the associated record.
+The watchers are the records whose model declares `watches`, in the example the authors. Watchtower runs the callback on the watchers a change reaches. With `association:`, Watchtower finds them by joining that association to the changed record, so any association works, including one through another.
 
 ```ruby
-# Reindex the author of a review that is added, changed or removed (Author has_many :reviews, through: :books)
-watches association: :reviews, callback: :reindex!
+class Author < ApplicationRecord
+  has_many :books
+  has_many :reviews, through: :books
+
+  watches association: :reviews, callback: :reindex!
+end
 ```
 
-When the relationship isn't a single association join, return the owners yourself with `affects:`.
+A new review of Persuasion reindexes Hedy, whose book it reviews. In the example, moving Persuasion also moves its reviews, so the editor's transaction reindexes Ada and Hedy through this trigger too, though no review was saved (see [Moves and destroys](#moves-and-destroys)).
+
+When the watchers are not reachable by an association, return them yourself with `affects:`. Suppose each book stores its co-authors' ids in a column rather than an association.
 
 ```ruby
 watches class: "Book",
-        affects: ->(book) { Author.where(id: book.author_id) },
+        affects: ->(book) { Author.where(id: book.co_author_ids) },
         callback: :reindex!
 ```
+
+`affects:` is given the changed record and returns its watchers as a relation. `class:` names the class to observe, since there is no association to infer it from. Watchtower evaluates `affects:` when the callback runs, so after a book loses a co-author the callback runs only on the current co-authors (see [Caveats](#caveats)).
 
 ### Filtering by attribute
 
@@ -111,18 +119,28 @@ A trigger with no `attribute:` fires on any change.
 
 ### Callbacks
 
+`callback:` is what Watchtower runs on each watcher a change reaches. Watchtower calls a method name on the watcher, and passes the watcher to a `Proc`.
+
 ```ruby
-watches association: :books, callback: :reindex!                 # method on the owner
-watches association: :books, callback: ->(author) { author.reindex! }  # proc, passed the owner
+watches association: :books, callback: :reindex!                         # calls author.reindex!
+watches association: :books, callback: ->(author) { author.reindex! }   # passes the author
 ```
 
-Several triggers of an observing class that share a callback and an `around:`, and run the same way (queued or inline, at the same `at:`), run it once per owner.
+The callback can also be given the change, i.e. whether the book was added, changed or removed and where it came from (see [Knowing what changed](#knowing-what-changed)).
+
+Several triggers of a model that share a callback and an `around:`, and run the same way (queued or inline, at the same `at:`), run the callback once per watcher:
 
 ```ruby
 watches association: :books, attribute: :title, callback: :reindex!
 watches association: :books, attribute: :genre, callback: :reindex!
 
-book.update!(title: "Persuasion", genre: "Novel")  # reindexes the book's author once, not twice
+persuasion.update!(title: "Persuasion: A Novel", genre: "Romance")    # reindexes Hedy once, not twice
+```
+
+`includes:` preloads associations on the watchers before the callbacks run, so a callback that reads one costs one query for all the watchers rather than one each. In the publisher rename (see [Wrapping the callbacks](#wrapping-the-callbacks)), each author's `refresh_publisher_names` reads the author's publishers:
+
+```ruby
+watches association: :publishers, callback: :refresh_publisher_names, includes: :publishers
 ```
 
 ## Gating triggers
@@ -169,7 +187,7 @@ A trigger with no `enabled:` always fires.
 
 ### `at: :commit` (the default)
 
-The trigger fires once the transaction commits. Watchtower combines all of the transaction's saves of one associated record into a single change, so the callback runs once for that record, on the owners it had before the transaction and the owners it has after. Anything in between is skipped.
+The trigger fires once the transaction commits. Watchtower combines all of the transaction's saves of one associated record into a single change, so the callback runs once for that record, on the records that watched it before the transaction and those that watch it after. Anything in between is skipped.
 
 ```ruby
 watches association: :books, callback: :reindex!
@@ -188,7 +206,7 @@ This suits anything that should reflect only what was committed, e.g. a search i
 
 ### `at: :save`
 
-The trigger fires as each save or destroy happens, inside the transaction, on the owners the record had before that save and the owners it has after.
+The trigger fires as each save or destroy happens, inside the transaction, on the records that watched the associated record before that save and those that watch it after.
 
 ```ruby
 watches association: :books, callback: :record_book_history, at: :save
@@ -208,12 +226,12 @@ This suits work that has to see every step rather than the outcome, e.g. a histo
 
 ### What fires, and how often
 
-A trigger that fires at the commit fires once for each associated record the transaction added, changed or removed, on all of its saves and destroys combined into one, even when they went through several instances of the record. It fires from a transaction callback (`current_transaction.after_commit`) once the outermost transaction commits, leaving out every save that rolled back, including one inside a savepoint (`requires_new: true`) that rolled back. A trigger that fires at the save fires once per save. Either way, each time a trigger fires, its callback runs once for each owner the change reaches, however many of the callback's triggers the change matches among those that run the same way (see [Callbacks](#callbacks)). A change reaches the owners the record had before it and the owners the record has when the callback runs, which are read from the database.
+A trigger that fires at the commit fires once for each associated record the transaction added, changed or removed, on all of its saves and destroys combined into one, even when they went through several instances of the record. It fires from a transaction callback (`current_transaction.after_commit`) once the outermost transaction commits, leaving out every save that rolled back, including one inside a savepoint (`requires_new: true`) that rolled back. A trigger that fires at the save fires once per save. Either way, each time a trigger fires, its callback runs once for each watcher the change reaches, however many of the callback's triggers the change matches among those that run the same way (see [Callbacks](#callbacks)). A change reaches the records that watched the associated record before it and those that watch it when the callback runs, which are read from the database.
 
 | In one transaction | `at: :commit` | `at: :save` |
 | --- | --- | --- |
 | A book's `title` is saved twice | `reindex!` runs once on its author, after the commit | `reindex!` runs twice on its author, once for each save |
-| A book moves from Ada to Grace, then to Hedy | the callback runs on Ada and Hedy. Grace held the book only inside the transaction, so nothing she derives changed | inline, the callback runs on Ada and Grace at the first save, and on Grace and Hedy at the second. Queued, each save's job runs on the owner before that save and on the owner when the job runs. With a queue in the application's database that is after the commit, so Ada and Hedy, then Grace and Hedy. A queue outside the database can run a job before the commit, when its connection still sees an earlier owner |
+| A book moves from Ada to Grace, then to Hedy | the callback runs on Ada and Hedy. Grace held the book only inside the transaction, so nothing she derives changed | inline, the callback runs on Ada and Grace at the first save, and on Grace and Hedy at the second. Queued, each save's job runs on the book's watcher before that save and on its watcher when the job runs. With a queue in the application's database that is after the commit, so Ada and Hedy, then Grace and Hedy. A queue outside the database can run a job before the commit, when its connection still sees an earlier watcher |
 | The transaction rolls back | nothing runs | inline callbacks have already run, and only their database writes are undone; queued jobs are rolled back only by a queue in the same database |
 
 ## Running inline
@@ -301,11 +319,11 @@ end
 
 ## Wrapping the callbacks
 
-`around:` wraps all the callbacks one change runs. It is a `Proc` that takes a block. When a change fires the trigger, Watchtower calls the `Proc` once and passes it a block that runs the callback on every owner the change reaches. Your `Proc` calls that block, and decides what happens before and after it. It is not given the owners.
+`around:` wraps all the callbacks one change runs. It is a `Proc` that takes a block. When a change fires the trigger, Watchtower calls the `Proc` once and passes it a block that runs the callback on every watcher the change reaches. Your `Proc` calls that block, and decides what happens before and after it. It is not given the watchers.
 
 A queued trigger runs its callbacks inside a `Watchtower::Job`, which your application's code never calls, so `around:` is the way to wrap them. An inline trigger runs its callbacks in the thread that made the change, and `around:` wraps them there too, so every place that saves a record gets the same wrapping without having to remember it.
 
-The wrapping pays off when one change reaches many owners. A publisher belongs to every author who has a book it published, so renaming one updates all of them. Here each author stores the names of their publishers, and `around:` runs all the updates in one transaction, so the authors are written together and either all change or none does.
+The wrapping pays off when one change reaches many watchers. A publisher belongs to every author who has a book it published, so renaming one updates all of them. Here each author stores the names of their publishers, and `around:` runs all the updates in one transaction, so the authors are written together and either all change or none does.
 
 ```ruby
 class Author < ApplicationRecord
@@ -328,11 +346,11 @@ end                                                     # the 300 updates commit
 
 `around:` covers the callbacks of one change only. Each publisher, and each transaction, gets a block of its own, so to collect the work of many changes, collect it in your application instead (see [Collecting changes across transactions](#collecting-changes-across-transactions)).
 
-Triggers that share an observing class, a callback and an `around:` run the callback once per owner inside one block. Triggers whose `around:` differs run inside their own.
+Triggers of a model that share a callback and an `around:` run the callback once per watcher inside one block. Triggers whose `around:` differs run inside their own.
 
 ## Knowing what changed
 
-The callback is offered the owner and the change, a `Watchtower::OwnerChange` describing how the change affected that owner. A proc receives both, and a method on the owner receives the change as its argument.
+The callback is offered the watcher and the change, a `Watchtower::WatcherChange` describing how the change affected that watcher. A proc receives both, and a method on the watcher receives the change as its argument.
 
 ```ruby
 class Author < ApplicationRecord
@@ -341,8 +359,8 @@ class Author < ApplicationRecord
 
   def book_changed(change)
     case change.kind
-    when :added   then record_arrival(change.record, from: change.previous_owners)
-    when :removed then record_departure(change.record_id, to: change.owners)
+    when :added   then record_arrival(change.record, from: change.previous_watchers)
+    when :removed then record_departure(change.record_id, to: change.watchers)
     when :changed then refresh_book(change.record, change.changed_attributes)
     end
   end
@@ -351,43 +369,43 @@ end
 
 | Method | Value |
 | --- | --- |
-| `kind` | `:added` when the record was added to the owner's association<br>`:removed` when it was removed from it, including by being destroyed<br>`:changed` when it changed while staying in it<br>`nil` when its previous owners cannot be known |
+| `kind` | `:added` when the record was added to the watcher's association<br>`:removed` when it was removed from it, including by being destroyed<br>`:changed` when it changed while staying in it<br>`nil` when its previous watchers cannot be known |
 | `record` | the associated record; `nil` when a job runs after it was destroyed or deleted |
 | `record_class`, `record_id` | the associated record's class and id |
 | `destroyed?` | whether the record was destroyed |
 | `changed_attributes` | the attributes the change saved; empty for a destroy, unless a trigger that fires at the commit combined it with an earlier save |
-| `previous_owners` | the owners before the change, as a relation, which for an added record says where it came from; `nil` when they cannot be known |
-| `owners` | the owners after the change, as a relation, which for a removed record says where it went; none once it is destroyed |
+| `previous_watchers` | the watchers before the change, as a relation, which for an added record says where it came from; `nil` when they cannot be known |
+| `watchers` | the watchers after the change, as a relation, which for a removed record says where it went; none once it is destroyed |
 
-A trigger that fires at the commit describes the transaction's changes to the record combined into one. In the example (see [The example used in this guide](#the-example-used-in-this-guide)), Ada is told Persuasion was removed, with Hedy as its owner, and Hedy is told it was added, with Ada as its previous owner. The callback does not run on Grace, who held the book only inside the transaction. A trigger that fires `at: :save` describes each step.
+A trigger that fires at the commit describes the transaction's changes to the record combined into one. In the example (see [The example used in this guide](#the-example-used-in-this-guide)), Ada is told Persuasion was removed, with Hedy as its watcher, and Hedy is told it was added, with Ada as its previous watcher. The callback does not run on Grace, who held the book only inside the transaction. A trigger that fires `at: :save` describes each step.
 
-What an owner can be told depends on the kind of watch.
+What a watcher can be told depends on the kind of watch.
 
-| Watch | Declaration | `kind` | `previous_owners` / `owners` |
+| Watch | Declaration | `kind` | `previous_watchers` / `watchers` |
 | --- | --- | --- | --- |
 | Direct `has_many` or `has_one` | `has_many :books`<br>`watches association: :books, callback: :book_changed` | `:added`, `:removed`, `:changed` | before: from the book's previous `author_id`; after: the book's current author |
 | Polymorphic | `has_many :comments, as: :commentable`<br>`watches association: :comments, callback: :comment_changed` | `:added`, `:removed`, `:changed` | before: from the comment's previous `commentable_id` and `commentable_type`; after: the comment's current commentable |
-| `has_many :through` | `has_many :reviews, through: :books`<br>`watches association: :reviews, callback: :review_changed` | `:added`, `:removed`, `:changed`¹ | before: from the previous foreign keys of the review or the book; after: the current owners |
-| Nested `has_many :through` | `has_many :review_comments, through: :books`<br>`watches association: :review_comments, callback: :comment_changed` | `:changed`, or `nil` when the comment may have moved²; `:added` or `:removed` for a change to a book¹ | before: `nil` when the comment may have moved², the current owners for another change to the comment, and from the book's previous `author_id` for a change to a book; after: the current owners |
-| Scoped association | `has_many :published_books, -> { where(published: true) }, class_name: "Book"`<br>`watches association: :published_books, callback: :book_changed` | `nil`⁵ | before: `nil`⁵; after: the current owners |
+| `has_many :through` | `has_many :reviews, through: :books`<br>`watches association: :reviews, callback: :review_changed` | `:added`, `:removed`, `:changed`¹ | before: from the previous foreign keys of the review or the book; after: the current watchers |
+| Nested `has_many :through` | `has_many :review_comments, through: :books`<br>`watches association: :review_comments, callback: :comment_changed` | `:changed`, or `nil` when the comment may have moved²; `:added` or `:removed` for a change to a book¹ | before: `nil` when the comment may have moved², the current watchers for another change to the comment, and from the book's previous `author_id` for a change to a book; after: the current watchers |
+| Scoped association | `has_many :published_books, -> { where(published: true) }, class_name: "Book"`<br>`watches association: :published_books, callback: :book_changed` | `nil`⁵ | before: `nil`⁵; after: the current watchers |
 | `affects:` scope | `watches class: "Book", affects: ->(book) { Author.where(id: book.author_id) }, callback: :book_changed` | `:removed` on a destroy; `nil` otherwise³ | before: known only on a destroy³; after: the scope's result, or none after a destroy |
-| The owner `belongs_to` the associated record | on `Book`: `belongs_to :author`<br>`watches association: :author, callback: :author_changed` | `:changed`; `:removed` when the author is destroyed⁴ | before: the books that point at the author; after: the same books, or none once the author is destroyed |
+| The watcher `belongs_to` the associated record | on `Book`: `belongs_to :author`<br>`watches association: :author, callback: :author_changed` | `:changed`; `:removed` when the author is destroyed⁴ | before: the books that point at the author; after: the same books, or none once the author is destroyed |
 
 1. A change can come from the record the association passes through. When a `Book` moves from Ada to Grace, Ada loses the book's reviews and Grace gains them, and `change.record` is the `Book`, not a review.
-2. When the association's source is itself a `has_many :through`, as here where `Book` has `has_many :review_comments, through: :reviews, source: :comments`, the associated record holds no foreign key that Watchtower reads to find its owners. Watchtower then treats a change to any of the record's own `belongs_to` foreign keys as a possible move, and leaves its previous owners unknown. Destroying such a record runs no callback, since neither its previous owners nor its current ones can be read (see [Caveats](#caveats)).
-3. An `affects:` scope may select owners by anything, so Watchtower cannot tell which owners a change added or removed. A destroy's owners are read before the record is gone.
+2. When the association's source is itself a `has_many :through`, as here where `Book` has `has_many :review_comments, through: :reviews, source: :comments`, the associated record holds no foreign key that Watchtower reads to find its watchers. Watchtower then treats a change to any of the record's own `belongs_to` foreign keys as a possible move, and leaves its previous watchers unknown. Destroying such a record runs no callback, since neither its previous watchers nor its current ones can be read (see [Caveats](#caveats)).
+3. An `affects:` scope may select watchers by anything, so Watchtower cannot tell which watchers gained or lost the record. A destroy's watchers are read before the record is gone.
 4. Saving an `Author` does not change which books point at it, so it neither adds nor removes any.
-5. A scope can take in or leave out a record without any key changing, e.g. when a book is published, so Watchtower cannot tell which owners gained or lost it. This applies wherever a scope appears along the association, including on an association it passes through.
+5. A scope can take in or leave out a record without any key changing, e.g. when a book is published, so Watchtower cannot tell which watchers gained or lost it. This applies wherever a scope appears along the association, including on an association it passes through.
 
 ## Moves and destroys
 
-An associated record removed from an owner leaves the owner behind that the association join no longer reaches. Watchtower runs the callback on that owner too.
+When an associated record is removed from a watcher, the association join no longer reaches that watcher. Watchtower runs the callback on it too.
 
-- **Moves.** A save that changes the foreign key linking the associated record to its owners, and for a polymorphic association the type, runs the callback on the owner the record was removed from and the owner it was added to. Moving a `Book` to another `Author` reindexes both.
-- **Destroys.** Destroying an associated record runs the callback on the owners it had.
+- **Moves.** A save that changes the foreign key linking the associated record to its watchers, and for a polymorphic association the type, runs the callback on the watcher the record was removed from and the watcher it was added to. Moving a `Book` to another `Author` reindexes both.
+- **Destroys.** Destroying an associated record runs the callback on the records that watched it.
 - **Records an association passes through.** For `has_many :reviews, through: :books`, moving or destroying a `Book` changes an author's reviews without any `Review` saving, so a trigger on `:reviews` also watches `Book`. Only a change to the `Book`'s foreign keys fires it (its `author_id`, or for `has_many :publishers, through: :books`, its `publisher_id`), not every `Book` save. A trigger declared before its association (with `class:`) starts watching the record it passes through the next time the observer reinitializes after the association exists. The observer reinitializes once the application has initialized, and whenever a new trigger watches a class it does not yet observe.
 
-For a queued trigger, the owners before the change are found from the foreign keys the change carries, not queried in the thread that made the change, so a save costs no more reads with a trigger than without one. The one exception is an `affects:` trigger on a destroyed record, whose scope is evaluated at the destroy, since the job can no longer load the record.
+For a queued trigger, the watchers before the change are found from the foreign keys the change carries, not queried in the thread that made the change, so a save costs no more reads with a trigger than without one. The one exception is an `affects:` trigger on a destroyed record, whose scope is evaluated at the destroy, since the job can no longer load the record.
 
 ## Asynchronous processing
 
@@ -405,10 +423,10 @@ Queued callbacks run in `Watchtower::Job`, an `ActiveJob`, so the change that fi
   | A comment moves to a review on another book | only the new author |
   | A comment is destroyed | no author |
   | A review moves to another book, or is destroyed | no author |
-- **`affects:` on a move.** An `affects:` scope is evaluated on the associated record as it is when the callback runs, so it reaches only the current owners.
+- **`affects:` on a move.** An `affects:` scope is evaluated on the associated record as it is when the callback runs, so it reaches only the current watchers.
 - **STI.** The change payload identifies the associated record by `base_class`, so triggers are matched against the base class of an STI hierarchy.
-- **Scoped associations.** An associated record that stops matching an association's scope without a key changing, e.g. a book unpublished under `has_many :published_books, -> { where(published: true) }`, is no longer joined to its owner, so the change reaches no owner and no callback runs.
-- **Saves through an out-of-date instance.** A move's previous owner is the one the saving instance last loaded or saved, not the one stored in the database, so a save costs no extra read. When a book is loaded under Ada, another process moves it to Grace and commits, and the first instance then moves it to Hedy, that save reports Ada as the previous owner, and Grace, who held the book, is not reached. The save also overwrites a change it never saw, so reload an instance before saving it after another may have written the row.
+- **Scoped associations.** An associated record that stops matching an association's scope without a key changing, e.g. a book unpublished under `has_many :published_books, -> { where(published: true) }`, is no longer joined to its watcher, so the change reaches no watcher and no callback runs.
+- **Saves through an out-of-date instance.** A move's previous watcher is the one the saving instance last loaded or saved, not the one stored in the database, so a save costs no extra read. When a book is loaded under Ada, another process moves it to Grace and commits, and the first instance then moves it to Hedy, that save reports Ada as the previous watcher, and Grace, who held the book, is not reached. The save also overwrites a change it never saw, so reload an instance before saving it after another may have written the row.
 
 ## Development
 
