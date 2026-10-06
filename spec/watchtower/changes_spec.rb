@@ -336,6 +336,24 @@ RSpec.describe "Watchtower triggers on saves, moves and destroys" do
       end.to reindex(author)
     end
 
+    it "does not run when the only save that enabled it rolled back in a savepoint" do
+      enabled = false
+      Author.watches(association: :reviews, callback: :reindex!, inline: true, enabled: -> { enabled })
+      review = Review.create!(book: book, rating: 5)
+
+      expect do
+        Review.transaction do
+          review.update!(rating: 4)
+          Review.transaction(requires_new: true) do
+            enabled = true
+            review.update!(rating: 3)
+            enabled = false
+            raise ActiveRecord::Rollback
+          end
+        end
+      end.to not_reindex(author)
+    end
+
     it "runs when its enabled predicate was true at the save, though it is false at the commit" do
       enabled = true
       Author.watches(association: :reviews, callback: :reindex!, inline: true, enabled: -> { enabled })
