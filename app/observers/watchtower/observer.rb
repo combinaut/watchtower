@@ -85,6 +85,16 @@ module Watchtower
     # A Trigger's `declaration` is an object unique to the `watches` call that declared it, which tells two triggers
     # apart within the process even when their keys match.
     Trigger = Struct.new(:observing_class, :callback, :association, :attributes, :class, :affects, :includes, :enabled, :inline, :around, :at, :watches, :declaration, keyword_init: true) do
+      # Whether the trigger fires at `point`, one of `FIRING_POINTS`.
+      def fires_at?(point)
+        at == point
+      end
+
+      # `at_commit?` and `at_save?`: whether the trigger fires at that point.
+      FIRING_POINTS.each do |point|
+        define_method(:"at_#{point}?") { fires_at?(point) }
+      end
+
       # Stable, serialisable identity for a trigger. Lets the observer's enable/disable decision
       # (see Observer#enqueue) be carried in the job payload and matched back to this trigger
       # when the asynchronous Watchtower::Job runs (see Job#trigger_suppressed?). Two triggers on the
@@ -96,7 +106,7 @@ module Watchtower
           attributes.presence&.join(","),
           (enabled && "enabled:#{Trigger.identity(enabled)}"),
           (around && "around:#{Trigger.identity(around)}"),
-          ("at:save" if at == :save)
+          ("at:save" if at_save?)
         ]
         [ observing_class.name, Trigger.identity(callback), association, *distinctions.compact ].join("/")
       end
@@ -196,7 +206,7 @@ module Watchtower
       return if triggers.empty?
 
       change = Change.capture(changed_record, triggers, destroyed: destroyed, resolve_affects: destroyed)
-      at_commit, at_save = triggers.partition { |trigger| trigger.at == :commit }
+      at_commit, at_save = triggers.partition(&:at_commit?)
       if at_commit.any?
         enabled = []
         # Held before the predicates are read, so a change a predicate saves to the same row is held after this one
@@ -252,7 +262,7 @@ module Watchtower
       held.each_value do |entries|
         next if entries.empty?
 
-        triggers = triggers_for(entries.last.first.record_type.constantize).select { |trigger| trigger.at == :commit }
+        triggers = triggers_for(entries.last.first.record_type.constantize).select(&:at_commit?)
         fire_at_commit(triggers, entries.map(&:first).reduce(:merge), entries.flat_map(&:last).uniq)
       end
     end

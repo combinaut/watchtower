@@ -35,6 +35,13 @@ RSpec.describe Watchtower::Observer do
       expect(trigger.at).to eq(:commit)
     end
 
+    it "answers which point it fires at" do
+      at_commit = described_class.build_trigger(observing_class: Author, association: :books, callback: :reindex!)
+      at_save = described_class.build_trigger(observing_class: Author, association: :books, callback: :reindex!, at: :save, inline: true)
+
+      expect([ at_commit.at_commit?, at_commit.at_save?, at_save.at_commit?, at_save.at_save? ]).to eq([ true, false, false, true ])
+    end
+
     it "raises for an at: other than :commit or :save" do
       [ :before_save, 1, false ].each do |at|
         expect { described_class.build_trigger(observing_class: Author, association: :books, callback: :reindex!, at: at) }
