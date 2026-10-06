@@ -375,6 +375,28 @@ RSpec.describe "Watchtower triggers on saves, moves and destroys" do
       expect { Book.transaction { book.update!(author: other_author) } }.to reindex(author, hedy).and not_reindex(other_author)
     end
 
+    it "runs with a predicate that has no source location" do
+      Author.watches(association: :reviews, callback: :reindex!, inline: true, enabled: true.method(:itself).to_proc)
+      review = Review.create!(book: book, rating: 5)
+
+      expect { review.update!(rating: 4) }.to reindex(author)
+    end
+
+    it "keeps the decisions of triggers declared from the same lines apart" do
+      calls = []
+      declare = lambda do |enabled|
+        Author.watches(association: :reviews, callback: ->(_author) { calls << enabled }, inline: true, enabled: -> { enabled })
+      end
+      declare.call(true)
+      declare.call(false)
+      review = Review.create!(book: book, rating: 5)
+      calls.clear
+
+      review.update!(rating: 4)
+
+      expect(calls).to eq([ true ])
+    end
+
     it "runs when any save of the record in the transaction enabled it" do
       enabled = true
       Author.watches(association: :reviews, callback: :reindex!, inline: true, enabled: -> { enabled })
