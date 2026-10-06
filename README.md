@@ -206,13 +206,13 @@ This suits anything that should reflect only what was committed, e.g. a search i
 
 ### `at: :save`
 
-The trigger fires as each save or destroy happens, inside the transaction, on the records that watched the associated record before that save and those that watch it after.
+The trigger fires as each save or destroy happens, inside the transaction. An inline trigger runs its callback right then, on the records that watched the associated record before that save and those that watch it after.
 
 ```ruby
-watches association: :books, callback: :record_book_history, at: :save
+watches association: :books, callback: :record_book_history, inline: true, at: :save
 ```
 
-In the example, each of the three saves fires the trigger:
+In the example, each of the three saves runs the callback:
 
 ```ruby
 ada.record_book_history     # save 1: Persuasion left Ada
@@ -222,7 +222,9 @@ hedy.record_book_history    # save 2: and joined Hedy
 hedy.record_book_history    # save 3: retitled
 ```
 
-This suits work that has to see every step rather than the outcome, e.g. a history that shows the book passed through Grace. Run inline, the callback writes inside the transaction, so a rollback undoes its writes along with the book (see [Running inline](#running-inline)).
+This suits work that has to see every step rather than the outcome, e.g. a history that shows the book passed through Grace. The callback writes inside the transaction, so a rollback undoes its writes along with the book.
+
+A queued trigger that fires at the save enqueues a job at each save instead, and each job runs later, reading the book as it is when the job runs. It cannot see the steps, so it does not suit a history (see [Queued, `at: :save`](#queued-at-save)).
 
 ### What fires, and how often
 
