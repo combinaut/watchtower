@@ -280,6 +280,15 @@ RSpec.describe Watchtower::Observer do
       end
     end
 
+    it "reads a queued trigger's predicate after the inline callbacks have run" do
+      gate = { open: true }
+      Author.watches(association: :books, callback: ->(_author) { gate[:open] = false }, inline: true, at: :save)
+      Author.watches(association: :books, callback: :reindex!, at: :save, enabled: -> { gate[:open] })
+      clear_enqueued_jobs
+
+      expect { book.update!(title: "Changed") }.not_to have_enqueued_job(Watchtower::Job)
+    end
+
     it "runs an inline callback inside the transaction, so a rollback undoes what it wrote" do
       Author.watches(association: :books, callback: :reindex!, inline: true, at: :save)
 

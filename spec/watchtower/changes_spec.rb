@@ -338,6 +338,21 @@ RSpec.describe "Watchtower triggers on saves, moves and destroys" do
       end.to not_reindex(author)
     end
 
+    it "runs on the owners before and after the transaction when a predicate saves the record again" do
+      hedy = Author.create!(name: "Hedy")
+      book
+      moved = false
+      Author.watches(association: :books, callback: :touch, inline: true, enabled: lambda { |changed|
+        unless moved
+          moved = true
+          Book.find(changed.id).update!(author: hedy)
+        end
+        true
+      })
+
+      expect { Book.transaction { book.update!(author: other_author) } }.to reindex(author, hedy).and not_reindex(other_author)
+    end
+
     it "runs when any save of the record in the transaction enabled it" do
       enabled = true
       Author.watches(association: :reviews, callback: :reindex!, inline: true, enabled: -> { enabled })
