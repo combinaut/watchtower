@@ -142,6 +142,28 @@ RSpec.describe "Watchtower triggers on saves, moves and destroys" do
       expect { book.update!(author: other_author) }.to reindex(author, other_author)
     end
 
+    it "runs a trigger the observer rebuilds between the save and the commit" do
+      late_author = Class.new(ApplicationRecord) do
+        self.table_name = "authors"
+
+        def reindex!
+          increment!(:reindex_count)
+        end
+      end
+      stub_const("LateAuthor", late_author)
+      review = Review.create!(book: book, rating: 5)
+      LateAuthor.watches(association: :reviews, class: "Review", callback: :reindex!)
+
+      expect do
+        Review.transaction do
+          review.update!(rating: 4)
+          LateAuthor.has_many :books, foreign_key: :author_id
+          LateAuthor.has_many :reviews, through: :books
+          Watchtower::Observer.reinitialize
+        end
+      end.to reindex(author)
+    end
+
     it "runs a trigger on a subclass for a saved record of that subclass" do
       Author.watches(association: :novels, callback: :reindex!)
       novel = Novel.create!(author: author, title: "Draft")

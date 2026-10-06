@@ -198,7 +198,7 @@ module Watchtower
         # Held before the predicates are read, so a change a predicate saves to the same row is held after this one
         # and the merged change keeps this one's previous owners.
         hold_for_commit(changed_record, change, enabled)
-        enabled.concat(enabled_triggers(at_commit, changed_record))
+        enabled.concat(enabled_triggers(at_commit, changed_record).map(&:key))
       end
       fire_at_save(at_save, changed_record, change) if at_save.any?
     end
@@ -208,15 +208,15 @@ module Watchtower
     def fire_at_save(triggers, changed_record, change)
       inline, queued = triggers.partition(&:inline)
       Dispatch.run(enabled_triggers(inline, changed_record), change)
-      enqueue(queued, :save, change, enabled_triggers(queued, changed_record))
+      enqueue(queued, :save, change, enabled_triggers(queued, changed_record).map(&:key))
     end
 
     def enabled_triggers(triggers, changed_record)
       triggers.select { |trigger| trigger_enabled?(trigger, changed_record) }
     end
 
-    # Holds `change`, with `enabled`, the list of commit-time triggers it enables, among the changes awaiting a commit
-    # on the record's connection, and has the transaction it was made in flush them when it commits (`flush`), or drop
+    # Holds `change`, with `enabled`, the keys of the commit-time triggers it enables, among the changes awaiting a
+    # commit on the record's connection, and has the transaction it was made in flush them when it commits (`flush`), or drop
     # it when it, or the savepoint it was made in, rolls back. `flush` reads `enabled` at the commit, so the caller can
     # fill it after the change is held. Rails runs a transaction's `after_commit` blocks once its outermost transaction
     # commits, and passes a released savepoint's blocks to the transaction around it.
@@ -253,27 +253,28 @@ module Watchtower
       end
     end
 
-    # The changes awaiting a commit on `connection`, `{ [base class name, id] => [[change, enabled triggers], ...] }`
-    # in the order they were saved.
+    # The changes awaiting a commit on `connection`, `{ [base class name, id] => [[change, enabled trigger keys], ...] }`
+    # in the order they were saved. Decisions are kept by `Trigger#key`, which stays the same when `reinitialize`
+    # rebuilds a trigger between the save and the commit.
     def held_changes(connection)
       connection.instance_variable_get(:@watchtower_held_changes) || connection.instance_variable_set(:@watchtower_held_changes, {})
     end
 
-    # Fires `change` for `triggers`, the `at: :commit` ones, in this thread. Those among `enabled` that run inline run
-    # here, and the queued ones among `enabled` run in one `Watchtower::Job`.
+    # Fires `change` for `triggers`, the `at: :commit` ones, in this thread. Those whose keys are among `enabled` run
+    # inline here, or, when queued, in one `Watchtower::Job`.
     def fire_at_commit(triggers, change, enabled)
       inline, queued = triggers.partition(&:inline)
-      Dispatch.run(inline & enabled, change)
+      Dispatch.run(inline.select { |trigger| enabled.include?(trigger.key) }, change)
       enqueue(queued, :commit, change, enabled)
     end
 
-    # Queues `change` for the `queued` triggers among `enabled`. The job runs the queued triggers that fire `at` and
-    # that the change reaches, except those whose keys it carries as suppressed, which are the ones not enabled.
-    # Enqueues nothing when none of them is enabled.
+    # Queues `change` for the `queued` triggers whose keys are among `enabled`. The job runs the queued triggers that
+    # fire `at` and that the change reaches, except those whose keys it carries as suppressed, which are the ones not
+    # enabled. Enqueues nothing when none of them is enabled.
     def enqueue(queued, at, change, enabled)
-      return if (queued & enabled).empty?
+      suppressed = queued.reject { |trigger| enabled.include?(trigger.key) }
+      return if suppressed.length == queued.length
 
-      suppressed = queued - enabled
       payload = change.to_payload.merge(at: at)
       payload[:suppressed_trigger_keys] = suppressed.map(&:key) if suppressed.any?
       Watchtower::Job.perform_later(**payload)
