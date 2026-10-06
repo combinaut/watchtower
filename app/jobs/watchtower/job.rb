@@ -23,15 +23,15 @@ module Watchtower
     # those it marked as suppressed. A job enqueued without `at` fires the commit-time triggers.
     def perform(at: :commit, suppressed_trigger_keys: [], **payload)
       change = Change.from_payload(**payload)
-      triggers = Watchtower::Observer.triggers.reject(&:inline).select { |trigger| trigger.at == at.to_sym && change.watches_of(trigger).any? }
+      triggers = Watchtower::Observer.triggers.reject(&:inline).select { |trigger| trigger.fires_at?(at.to_sym) && change.watches_of(trigger).any? }
       Dispatch.run(triggers.reject { |trigger| trigger_suppressed?(trigger, suppressed_trigger_keys) }, change)
     end
 
     private
 
     # Whether the observer marked `trigger` as not to run in this job (see `Observer#enqueue`), because its `enabled`
-    # predicate was false when it fired. The decision is honoured rather than re-evaluated, because the context that
-    # informed it does not exist on this thread.
+    # predicate was false at every save or destroy the job's change covers. The decision is honoured rather than
+    # re-evaluated, because the context that informed it does not exist on this thread.
     def trigger_suppressed?(trigger, suppressed_trigger_keys)
       suppressed_trigger_keys.include?(trigger.key)
     end

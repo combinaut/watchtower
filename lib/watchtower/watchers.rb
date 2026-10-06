@@ -1,41 +1,41 @@
 module Watchtower
   # Used to find the records of the observing class that a change reaches through one watch of a trigger: the
-  # owners the changed record has after the change, and when the change moved or destroyed it, its previous owners,
-  # which the association join no longer reaches. The previous owners are found from what the change carries (its
+  # watchers the changed record has after the change, and when the change moved or destroyed it, its previous watchers,
+  # which the association join no longer reaches. The previous watchers are found from what the change carries (its
   # previous foreign keys, or the `affects:` ids of a destroyed record), or, for a destroyed record that the records
   # an association passes through point at, from its id, and for a polymorphic source its type.
-  class Audience
+  class Watchers
     def initialize(trigger, watch)
       @trigger = trigger
       @watch = watch
     end
 
-    # The relations of the observing class that hold the audience: none, one or two.
+    # The relations of the observing class that hold the watchers: none, one or two.
     def scopes(change)
-      [ current(change), previous_owners(change) ].compact
+      [ current(change), previous_watchers(change) ].compact
     end
 
-    # The owners the record has after the change: none once it is destroyed, or, unless the owners `belongs_to` it,
+    # The watchers the record has after the change: none once it is destroyed, or, unless the observing class `belongs_to` it,
     # once it can no longer be loaded.
-    def owners_after(change)
+    def after(change)
       return observing_class.none if change.destroyed
 
       current(change) || observing_class.none
     end
 
-    # The owners the record had before the change: for a destroy or a move, its previous owners, and otherwise the
-    # owners it has after the change. Nil when they cannot be known:
+    # The watchers the record had before the change: for a destroy or a move, its previous watchers, and otherwise the
+    # watchers it has after the change. Nil when they cannot be known:
     #   - a scoped association, whose scope can take in or leave out the record without any key changing
     #   - an `affects:` scope, on anything but a destroy
     #   - through an association whose source is itself a `has_many :through`, a change to one of the record's own
     #     `belongs_to` foreign keys
-    def owners_before(change)
+    def before(change)
       return nil if scoped?
-      return previous_owners(change) || current(change) || observing_class.none if change.destroyed
-      return previous_owners(change) || observing_class.none if moved?(change)
+      return previous_watchers(change) || current(change) || observing_class.none if change.destroyed
+      return previous_watchers(change) || observing_class.none if moved?(change)
       return nil if possibly_moved?(change)
 
-      owners_after(change)
+      after(change)
     end
 
     private
@@ -76,21 +76,21 @@ module Watchtower
       observing_class.joins(reflection.name).where(reflection.klass.table_name => { reflection.klass.primary_key => change.record_id })
     end
 
-    def previous_owners(change)
+    def previous_watchers(change)
       unless reflection
-        ids = change.previous_owner_ids[@trigger.key]
+        ids = change.previous_watcher_ids[@trigger.key]
         return ids.present? ? observing_class.where(observing_class.primary_key => ids) : nil
       end
 
       key_reflection = @watch.foreign_key_reflection
-      return previous_owners_by_foreign_key(key_reflection, change.previous_foreign_keys) if key_reflection
+      return previous_by_foreign_key(key_reflection, change.previous_foreign_keys) if key_reflection
 
-      previous_owners_of_destroyed_source(change) if change.destroyed
+      previous_of_destroyed_source(change) if change.destroyed
     end
 
-    # The owners the changed record's previous foreign keys reach through `key_reflection`. Nil when the previous
+    # The watchers the changed record's previous foreign keys reach through `key_reflection`. Nil when the previous
     # key is nil, or when a polymorphic previous type names a class other than the one `key_reflection` belongs to.
-    def previous_owners_by_foreign_key(key_reflection, previous_foreign_keys)
+    def previous_by_foreign_key(key_reflection, previous_foreign_keys)
       key = previous_foreign_keys[key_reflection.foreign_key.to_s]
       return nil if key.nil?
       return nil if key_reflection.type && previous_foreign_keys[key_reflection.type.to_s] != key_reflection.active_record.polymorphic_name
@@ -99,10 +99,10 @@ module Watchtower
       observing_class.joins(reflection.through_reflection.name).where(key_reflection.active_record.table_name => { key_reflection.active_record_primary_key => key })
     end
 
-    # The owners whose through records point at the destroyed record, as in `has_many :publishers, through: :books`,
+    # The watchers whose through records point at the destroyed record, as in `has_many :publishers, through: :books`,
     # where each `Book` holds the `Publisher`'s key. Nil unless the association passes through another to a
     # `belongs_to` source.
-    def previous_owners_of_destroyed_source(change)
+    def previous_of_destroyed_source(change)
       return nil unless reflection.through_reflection?
 
       source = reflection.source_reflection

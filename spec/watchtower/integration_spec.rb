@@ -1,16 +1,16 @@
-# End-to-end: a real save flows observer -> enqueued job -> callback on the audience.
+# End-to-end: a real save flows observer -> enqueued job -> callback on the watchers.
 RSpec.describe "Watchtower end-to-end", type: :model do
   let!(:author) { Author.create!(name: "Ada") }
   let!(:book) { Book.create!(author: author, title: "Original") }
 
-  it "reindexes the owner when a watched association record changes" do
+  it "reindexes the watcher when a watched association record changes" do
     Author.watches(association: :books, callback: :reindex!)
 
     expect { perform_enqueued_jobs { book.update!(title: "Changed") } }
       .to change { author.reload.reindex_count }.by(1)
   end
 
-  it "reindexes the owner when a new watched association record is created" do
+  it "reindexes the watcher when a new watched association record is created" do
     Author.watches(association: :books, callback: :reindex!)
 
     expect { perform_enqueued_jobs { Book.create!(author: author, title: "Second") } }

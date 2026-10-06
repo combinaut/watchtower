@@ -35,6 +35,13 @@ RSpec.describe Watchtower::Observer do
       expect(trigger.at).to eq(:commit)
     end
 
+    it "answers which point it fires at" do
+      at_commit = described_class.build_trigger(observing_class: Author, association: :books, callback: :reindex!)
+      at_save = described_class.build_trigger(observing_class: Author, association: :books, callback: :reindex!, at: :save, inline: true)
+
+      expect([ at_commit.at_commit?, at_commit.at_save?, at_save.at_commit?, at_save.at_save? ]).to eq([ true, false, false, true ])
+    end
+
     it "raises for an at: other than :commit or :save" do
       [ :before_save, 1, false ].each do |at|
         expect { described_class.build_trigger(observing_class: Author, association: :books, callback: :reindex!, at: at) }
@@ -152,7 +159,7 @@ RSpec.describe Watchtower::Observer do
           .with(hash_including(suppressed_trigger_keys: [ a_string_starting_with("Author/reindex!/books/enabled:") ]))
       end
 
-      it "reads the predicate when the change commits, not when it is saved" do
+      it "reads the predicate when the change is saved, not when it commits" do
         Author.watches(association: :books, callback: :reindex!, enabled: -> { Thread.current[:watchtower_spec_enabled] == true })
         clear_enqueued_jobs
 
@@ -162,7 +169,7 @@ RSpec.describe Watchtower::Observer do
             book.update!(title: "Changed")
             Thread.current[:watchtower_spec_enabled] = true
           end
-        end.to have_enqueued_job(Watchtower::Job)
+        end.not_to have_enqueued_job(Watchtower::Job)
       ensure
         Thread.current[:watchtower_spec_enabled] = nil
       end
@@ -209,7 +216,7 @@ RSpec.describe Watchtower::Observer do
       expect(Book.connection.instance_variable_get(:@watchtower_held_changes)).to be_blank
     end
 
-    it "enqueues one job for a record saved several times in one transaction, with the owner from before the first save" do
+    it "enqueues one job for a record saved several times in one transaction, with the watcher from before the first save" do
       Author.watches(association: :books, callback: :reindex!)
       other = Author.create!(name: "Grace")
       third = Author.create!(name: "Hedy")
@@ -278,6 +285,15 @@ RSpec.describe Watchtower::Observer do
         expect(Watchtower::Job).to have_been_enqueued, "the job is enqueued before the commit"
         gate[:open] = false
       end
+    end
+
+    it "reads a queued trigger's predicate after the inline callbacks have run" do
+      gate = { open: true }
+      Author.watches(association: :books, callback: ->(_author) { gate[:open] = false }, inline: true, at: :save)
+      Author.watches(association: :books, callback: :reindex!, at: :save, enabled: -> { gate[:open] })
+      clear_enqueued_jobs
+
+      expect { book.update!(title: "Changed") }.not_to have_enqueued_job(Watchtower::Job)
     end
 
     it "runs an inline callback inside the transaction, so a rollback undoes what it wrote" do
