@@ -74,7 +74,7 @@ end
 | `enabled:` | Whether Watchtower runs the callback for a change, read as the change is made (see [Gating triggers](#gating-triggers)). Defaults to always running it. |
 | `at:` | When the trigger fires, `:commit` once the transaction commits or `:save` at each save (see [Choosing when a trigger fires](#choosing-when-a-trigger-fires)). Defaults to `:commit`. |
 | `inline:` | Run the callback in the thread that made the change instead of in a job (see [Running inline](#running-inline)). Defaults to `false`. |
-| `around:` | A block the callbacks of a change run inside (see [Wrapping the callbacks](#wrapping-the-callbacks)). |
+| `around:` | A `Proc` that wraps all the callbacks one change runs, e.g. in a transaction (see [Wrapping the callbacks](#wrapping-the-callbacks)). |
 
 ### Audience: `association:` vs `affects:`
 
@@ -95,14 +95,19 @@ watches class: "Book",
 
 ### Filtering by attribute
 
-Fire only when specific columns change.
+`attribute:` (or `attributes:`) limits a trigger to changes that save one of the named attributes. An associated record added to the association or removed from it always fires the trigger, whatever changed.
 
 ```ruby
-# Reindex only when a book's title changes, not on every book save.
 watches association: :books, attribute: :title, callback: :reindex!
 ```
 
-A trigger with no `attributes` fires on any change. A trigger always fires when an associated record is added or removed, regardless of the watched attributes (see [Moves and destroys](#moves-and-destroys)).
+In the example, the editor's transaction still reindexes Ada and Hedy, because Persuasion was removed from Ada and added to Hedy. A later save that changes only the book's price does not reindex Hedy:
+
+```ruby
+persuasion.update!(price: 12)    # no reindex: price is not a watched attribute
+```
+
+A trigger with no `attribute:` fires on any change.
 
 ### Callbacks
 
@@ -296,26 +301,34 @@ end
 
 ## Wrapping the callbacks
 
-`around:` wraps the loop that runs the callback. When a change fires the trigger, Watchtower finds every owner the change reaches and calls the callback on each. `around:` is a `Proc` called once for the change, with a block that runs that whole loop. A queued trigger runs it inside the change's `Watchtower::Job`, and an inline one in the thread that made the change, when the trigger fires. It is never called per owner.
+`around:` wraps all the callbacks one change runs. It is a `Proc` that takes a block. When a change fires the trigger, Watchtower calls the `Proc` once and passes it a block that runs the callback on every owner the change reaches. Your `Proc` calls that block, and decides what happens before and after it. It is not given the owners.
 
-That makes it the place to batch what the callbacks do. Here the search index collects the reindexing of every author a change affects, and sends it in one request.
+A queued trigger runs its callbacks inside a `Watchtower::Job`, which your application's code never calls, so `around:` is the way to wrap them. An inline trigger runs its callbacks in the thread that made the change, and `around:` wraps them there too, so every place that saves a record gets the same wrapping without having to remember it.
 
-```ruby
-watches association: :books,
-        callback: :reindex!,
-        around: ->(&reindexing) { SearchIndex.batch(&reindexing) }
-```
-
-When Book 7 moves from Ada to Grace, the change runs the following.
+The wrapping pays off when one change reaches many owners. A publisher belongs to every author who has a book it published, so renaming one updates all of them. Here each author stores the names of their publishers, and `around:` runs all the updates in one transaction, so the authors are written together and either all change or none does.
 
 ```ruby
-SearchIndex.batch do   # around:, once for the change
-  ada.reindex!         # the callback, once per affected author
-  grace.reindex!
-end                    # SearchIndex.batch sends both here
+class Author < ApplicationRecord
+  has_many :books
+  has_many :publishers, through: :books
+
+  watches association: :publishers,
+          callback: :refresh_publisher_names,
+          around: ->(&run_callbacks) { Author.transaction(&run_callbacks) }
+end
 ```
 
-A block inside the callback would instead open and send a batch for every owner. Triggers that share an observing class, a callback and an `around:` run the callback once per owner inside that one block. Triggers whose `around:` differs run inside their own.
+Renaming Penguin, whose books 300 authors wrote, runs one job. In it, Watchtower calls your `Proc`, and the block it passes runs `refresh_publisher_names` on each author:
+
+```ruby
+Author.transaction do                                   # your around: Proc
+  penguin_authors.each(&:refresh_publisher_names)       # the block Watchtower passes: its loop over the 300 authors
+end                                                     # the 300 updates commit together
+```
+
+`around:` covers the callbacks of one change only. Each publisher, and each transaction, gets a block of its own, so to collect the work of many changes, collect it in your application instead (see [Collecting changes across transactions](#collecting-changes-across-transactions)).
+
+Triggers that share an observing class, a callback and an `around:` run the callback once per owner inside one block. Triggers whose `around:` differs run inside their own.
 
 ## Knowing what changed
 
