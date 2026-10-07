@@ -228,7 +228,7 @@ A queued trigger that fires at the save enqueues a job at each save instead, and
 
 ### What fires, and how often
 
-A trigger that fires at the commit fires once for the transaction, on every associated record it added, changed or removed, each record's saves and destroys combined into one, even when they went through several instances of the record. It fires from a transaction callback (`current_transaction.after_commit`) once the outermost transaction commits, leaving out every save that rolled back, including one inside a savepoint (`requires_new: true`) that rolled back. A trigger that fires at the save fires once per save. Either way, each time a trigger fires, its callback runs once for each watcher the changes reach, however many of the changes reach it and however many of the callback's triggers they match among those that run the same way (see [Callbacks](#callbacks)). A callback that takes the change runs once for each change instead (see [Knowing what changed](#knowing-what-changed)). A change reaches the records that watched the associated record before it and those that watch it when the callback runs, which are read from the database.
+A trigger that fires at the commit fires once for the transaction, on every associated record it added, changed or removed, each record's saves and destroys combined into one, even when they went through several instances of the record. It fires from a transaction callback (`current_transaction.after_commit`) once the outermost transaction commits, leaving out every save that rolled back, including one inside a savepoint (`requires_new: true`) that rolled back. A trigger that fires at the save fires once per save. Either way, each time a trigger fires, its callback runs once for each watcher the changes reach, however many of the changes reach it and however many of the callback's triggers they match among those that run the same way (see [Callbacks](#callbacks)). A callback that takes the change runs once for each change instead (see [Knowing what changed](#knowing-what-changed)). A change reaches the records that watched the associated record before it and those that watch it when the trigger fires, which are read from the database before any of its callbacks run (see [Callbacks that make changes](#callbacks-that-make-changes)).
 
 | In one transaction | `at: :commit` | `at: :save` |
 | --- | --- | --- |
@@ -335,7 +335,7 @@ class Author < ApplicationRecord
 
   watches association: :publishers,
           callback: :refresh_publisher_names,
-          around: ->(&run_callbacks) { Author.transaction(&run_callbacks) }
+          around: ->(&run_callbacks) { Author.transaction { run_callbacks.call } }
 end
 ```
 
@@ -424,6 +424,35 @@ Watchtower.report_changes(books, attributes: [ :title ])
 Watchtower reloads the records after the write, one query for each model, so `enabled:`, an `affects:` scope and the callback read the written values. It treats every record passed as changed in the named attributes, so pass only the records the write changed. Each reported change is handled like a save. Watchtower reads `enabled:` as the change is reported, holds the change for the commit, combines it with the transaction's other changes to the same book, and drops it if its transaction or savepoint rolls back. In the example, Ada is reindexed once, even if more than one of her books were tidied. Called outside a transaction, `report_changes` opens one, so all of the records fire together.
 
 A reported change cannot move a record between watchers, since Watchtower cannot read the keys it had before the write. `report_changes` raises `ArgumentError`, reporting nothing, for an attribute that ties a record to its watchers, e.g. `author_id`. Save such a record through its callbacks instead.
+
+## Complex use cases
+
+### Callbacks that make changes
+
+When a trigger fires, Watchtower finds every watcher and builds every `WatcherChange` before any of its callbacks run, so the callbacks see the changes as they stood when the trigger fired. A record a callback writes is a change of its own. It is not added to the changes the trigger is running on, and it fires its own triggers when its own transaction commits.
+
+Here the callback takes the change, and Ada's callback for Persuasion's change moves Emma to Grace:
+
+```ruby
+Book.transaction do
+  persuasion.update!(title: "Persuasion: A Novel")
+  emma.update!(title: "Emma: A Novel")
+end
+```
+
+- **Moved through its callbacks**, e.g. `emma.update!(author: grace)`, the move is a change of its own, so Ada is told Emma was `:removed` and Grace that it was `:added`. Emma's retitle is still described as it stood when the trigger fired, so Ada is also told Emma `:changed`. Inline, she can hear of the move first (see the table below).
+- **Moved without callbacks**, e.g. with `update_all`, Grace is never told, as with any write Watchtower does not see. `report_changes` cannot report a move (see [Changes made without callbacks](#changes-made-without-callbacks)), so move a record through its callbacks.
+
+When the change a callback makes fires depends on how its trigger runs:
+
+| The trigger that saves the record | Its save fires the triggers watching it | So they run |
+| --- | --- | --- |
+| `inline: true, at: :save` | during the save | inside the callback that made it |
+| `inline: true` | when the save's own transaction commits, as soon as it is saved, since the transaction that fired the trigger has already committed | inside the callback that made it |
+| `inline: true`, with an `around:` that opens a transaction, as in [Wrapping the callbacks](#wrapping-the-callbacks) | when the `around:` transaction commits | after the trigger's other callbacks |
+| Queued, either `at:` | in a job of its own, enqueued when the save's transaction commits | after the job that made it |
+
+A callback whose writes fire the trigger that ran it, directly or through other triggers, loops. Inline, the loop ends in a `SystemStackError`. Queued, each job enqueues the next, and nothing stops it. Watchtower does not detect loops, so check that a callback's writes cannot lead back to it.
 
 ## Asynchronous processing
 

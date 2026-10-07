@@ -467,6 +467,63 @@ RSpec.describe "Watchtower triggers on saves, moves and destroys" do
     end.to reindex(author)
   end
 
+  context "with a callback that saves a record another trigger watches" do
+    let!(:persuasion) { Book.create!(author: author, title: "Persuasion") }
+    let!(:emma) { Book.create!(author: author, title: "Emma") }
+    let(:log) { [] }
+
+    # A callback that logs when it starts and finishes on each change, and retitles Emma, through its callbacks, while
+    # running on Persuasion's change.
+    def retitling_emma
+      lambda do |_watcher, change|
+        log << [ :start, change.record_id ]
+        emma.update!(title: "Emma: A Novel") if change.record_id == persuasion.id
+        log << [ :finish, change.record_id ]
+      end
+    end
+
+    def nested
+      [ [ :start, persuasion.id ], [ :start, emma.id ], [ :finish, emma.id ], [ :finish, persuasion.id ] ]
+    end
+
+    def in_turn
+      [ [ :start, persuasion.id ], [ :finish, persuasion.id ], [ :start, emma.id ], [ :finish, emma.id ] ]
+    end
+
+    it "runs an inline, at: :save trigger on that save inside the callback that made it" do
+      Author.watches(association: :books, callback: retitling_emma, inline: true, at: :save)
+      persuasion.update!(title: "Persuasion: A Novel")
+
+      expect(log).to eq(nested)
+    end
+
+    it "runs an inline, at: :commit trigger on that save inside the callback that made it" do
+      Author.watches(association: :books, callback: retitling_emma, inline: true)
+      persuasion.update!(title: "Persuasion: A Novel")
+
+      expect(log).to eq(nested)
+    end
+
+    it "runs an inline trigger on that save after the group's callbacks when around: opens a transaction" do
+      Author.watches(association: :books, callback: retitling_emma, inline: true, around: ->(&callbacks) { Book.transaction { callbacks.call } })
+      persuasion.update!(title: "Persuasion: A Novel")
+
+      expect(log).to eq(in_turn)
+    end
+
+    [ :commit, :save ].each do |at|
+      it "runs a queued, at: :#{at} trigger on that save in a job of its own, after the job that made it" do
+        Author.watches(association: :books, callback: retitling_emma, at: at)
+        persuasion.update!(title: "Persuasion: A Novel")
+
+        perform_enqueued_jobs
+        perform_enqueued_jobs
+
+        expect([ log, performed_jobs.count { |job| job["job_class"] == "Watchtower::Job" } ]).to eq([ in_turn, 2 ])
+      end
+    end
+  end
+
   context "with a commit that changes several associated records" do
     let!(:persuasion) { Book.create!(author: author, title: "Persuasion") }
     let!(:emma) { Book.create!(author: author, title: "Emma") }
@@ -494,14 +551,14 @@ RSpec.describe "Watchtower triggers on saves, moves and destroys" do
       expect { retitle_all }.to reindex(author, other_author)
     end
 
-    it "finds the watchers of every change with one query" do
+    it "finds the watchers of every change together, reading their ids and then loading them" do
       Author.watches(association: :books, callback: :reindex!, inline: true)
       authors_read = 0
       counter = ->(*, payload) { authors_read += 1 if payload[:sql].start_with?("SELECT") && payload[:sql].include?('"authors"') }
 
       ActiveSupport::Notifications.subscribed(counter, "sql.active_record") { retitle_all }
 
-      expect(authors_read).to eq(1)
+      expect(authors_read).to eq(2)
     end
 
     it "gives a callback that wants the change each change that reaches the watcher" do
@@ -513,20 +570,53 @@ RSpec.describe "Watchtower triggers on saves, moves and destroys" do
       expect(seen).to contain_exactly([ "Ada", persuasion.id ], [ "Ada", emma.id ], [ "Grace", middlemarch.id ])
     end
 
-    it "describes each change as it stands when its callbacks run" do
-      seen = []
-      callback = lambda do |watcher, change|
-        seen << [ watcher.name, change.kind ]
+    # Wraps `callback` so that, run for Persuasion's change, it also moves Emma to Grace without callbacks, after
+    # Emma's change was made and before its callbacks run.
+    def retitle_moving_emma_from(callback)
+      lambda do |watcher, change|
+        callback.call(watcher, change)
         Book.where(id: emma.id).update_all(author_id: other_author.id) if change.record_id == persuasion.id
       end
-      Author.watches(association: :books, callback: callback, inline: true)
+    end
 
+    # Retitles Persuasion and Emma in one commit.
+    def retitle_persuasion_and_emma
       Book.transaction do
         persuasion.update!(title: "Persuasion: A Novel")
         emma.update!(title: "Emma: A Novel")
       end
+    end
 
-      expect(seen).to eq([ [ "Ada", :changed ], [ "Grace", :changed ] ])
+    it "describes every change as the database stood when the callbacks began" do
+      seen = []
+      Author.watches(association: :books, callback: retitle_moving_emma_from(->(watcher, change) { seen << [ watcher.name, change.kind ] }), inline: true)
+
+      retitle_persuasion_and_emma
+
+      expect(seen).to eq([ [ "Ada", :changed ], [ "Ada", :changed ] ])
+    end
+
+    it "runs an affects: callback on the watchers its scope selected when the callbacks began" do
+      seen = []
+      callback = lambda do |watcher, change|
+        seen << [ watcher.name, change.watchers.map(&:name) ]
+        emma.update_columns(author_id: other_author.id) if change.record_id == persuasion.id
+      end
+      Author.watches(class: "Book", affects: ->(book) { Author.where(id: book.author_id) }, callback: callback, inline: true)
+
+      retitle_persuasion_and_emma
+
+      expect(seen).to eq([ [ "Ada", [ "Ada" ] ], [ "Ada", [ "Ada" ] ] ])
+    end
+
+    it "gives a queued callback each record as it stood when the job began" do
+      seen = []
+      Author.watches(association: :books, callback: retitle_moving_emma_from(->(watcher, change) { seen << [ watcher.name, change.record.author_id ] }))
+
+      retitle_persuasion_and_emma
+      perform_enqueued_jobs
+
+      expect(seen).to eq([ [ "Ada", author.id ], [ "Ada", author.id ] ])
     end
 
     it "wraps all of the commit's callbacks in one around: block" do
