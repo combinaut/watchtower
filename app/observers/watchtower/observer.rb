@@ -85,9 +85,9 @@ module Watchtower
     # A Trigger's `declaration` is an object unique to the `watches` call that declared it, which tells two triggers
     # apart within the process even when their keys match.
     Trigger = Struct.new(:observing_class, :callback, :association, :attributes, :class, :affects, :includes, :enabled, :inline, :around, :at, :watches, :declaration, keyword_init: true) do
-      # Whether the trigger fires at `point`, one of `FIRING_POINTS`.
+      # Whether the trigger fires at `point`, one of `FIRING_POINTS` as a symbol or a string.
       def fires_at?(point)
-        at == point
+        at == point.to_sym
       end
 
       # `at_commit?` and `at_save?`: whether the trigger fires at that point.
@@ -192,11 +192,12 @@ module Watchtower
       observe_change(changed_record, destroyed: true)
     end
 
-    # Records that `attributes` of `records` changed without Active Record callbacks, e.g. by `update_all`, so their
-    # watchers' triggers fire as they would for a save of those attributes (see `Watchtower.report_changes`). Raises
-    # `ArgumentError`, before reporting anything, for an attribute that ties a record to its watchers, since the
-    # watchers it was moved from are unknown. The records on each connection are reported inside a transaction on it,
-    # which joins one already open, so outside a transaction each connection's records fire together when it commits.
+    # Reports that `attributes` of `records` changed without Active Record callbacks, e.g. by `update_all`, so their
+    # watchers' triggers fire as they would for a save of those attributes (see `Watchtower.report_changes`). Returns
+    # nil. Raises `ArgumentError`, before reporting anything, for an attribute that ties a record to its watchers, since
+    # the watchers it was moved from are unknown. The records on each connection are reported inside a transaction on
+    # it, which joins one already open, so outside a transaction each connection's records fire together when it
+    # commits.
     def report_changes(records, attributes:)
       attributes = Array(attributes).map(&:to_s)
       watched = reload_written(records).filter_map do |record|
@@ -213,6 +214,7 @@ module Watchtower
           group.each { |record, triggers| observe(record, Change.reported(record, attributes), triggers) }
         end
       end
+      nil
     end
 
     private

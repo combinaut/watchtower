@@ -23,7 +23,7 @@ module Watchtower
     # leaving out the triggers it marks as suppressed. A job enqueued without `at` fires the commit-time triggers, and
     # one enqueued without `changes` by an earlier version of Watchtower carries a single change as its arguments.
     def perform(at: :commit, changes: nil, **payload)
-      triggers = Watchtower::Observer.triggers.reject(&:inline).select { |trigger| trigger.fires_at?(at.to_sym) }
+      triggers = Watchtower::Observer.triggers.reject(&:inline).select { |trigger| trigger.fires_at?(at) }
       pairs = (changes || [ payload ]).flat_map do |entry|
         entry = entry.symbolize_keys
         suppressed_trigger_keys = entry.delete(:suppressed_trigger_keys) || []

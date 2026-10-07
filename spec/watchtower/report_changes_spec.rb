@@ -4,7 +4,7 @@ RSpec.describe "Watchtower.report_changes" do
   let!(:persuasion) { Book.create!(author: author, title: "Persuasion") }
   let!(:emma) { Book.create!(author: author, title: "Emma") }
 
-  # Retitles `books` without callbacks, as `update_all` does, and records the change.
+  # Retitles `books` without callbacks, as `update_all` does, and reports the change.
   def retitle_without_callbacks(*books)
     Book.where(id: books.map(&:id)).update_all(title: "Retitled")
     Watchtower.report_changes(books, attributes: [ :title ])
@@ -104,6 +104,11 @@ RSpec.describe "Watchtower.report_changes" do
     Book.where(id: persuasion.id).update_all(title: "Retitled")
 
     expect { Watchtower::Observer.instance.report_changes([ persuasion ], attributes: [ :title ]) }.to reindex(author)
+  end
+
+  it "returns nil" do
+    Author.watches(association: :books, callback: :reindex!)
+    expect(retitle_without_callbacks(persuasion)).to be_nil
   end
 
   it "does nothing for records no trigger watches" do
