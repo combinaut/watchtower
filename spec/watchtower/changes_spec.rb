@@ -513,6 +513,22 @@ RSpec.describe "Watchtower triggers on saves, moves and destroys" do
       expect(seen).to contain_exactly([ "Ada", persuasion.id ], [ "Ada", emma.id ], [ "Grace", middlemarch.id ])
     end
 
+    it "describes each change as it stands when its callbacks run" do
+      seen = []
+      callback = lambda do |watcher, change|
+        seen << [ watcher.name, change.kind ]
+        Book.where(id: emma.id).update_all(author_id: other_author.id) if change.record_id == persuasion.id
+      end
+      Author.watches(association: :books, callback: callback, inline: true)
+
+      Book.transaction do
+        persuasion.update!(title: "Persuasion: A Novel")
+        emma.update!(title: "Emma: A Novel")
+      end
+
+      expect(seen).to eq([ [ "Ada", :changed ], [ "Grace", :changed ] ])
+    end
+
     it "wraps all of the commit's callbacks in one around: block" do
       calls = []
       wrap = lambda do |&run|

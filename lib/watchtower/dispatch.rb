@@ -9,19 +9,26 @@ module Watchtower
     # for each change that reaches it, given the `Watchtower::WatcherChange` for that change (`watcher_changes`).
     def self.run(pairs)
       pairs.group_by { |trigger, _change| [ trigger.observing_class, trigger.callback, trigger.around ] }.each do |(observing_class, callback, around), group|
+        # Each run is `[watchers, change, triggers]`, with no change for a callback that does not want it. A change's
+        # `WatcherChange`s are built just before its callbacks run, so they describe the change as the watchers stand
+        # then, after any earlier callback of the group has run.
         runs =
           if Helpers.callback_wants_change?(callback, observing_class)
             group.group_by(&:last).filter_map do |change, change_pairs|
               watchers = watchers(observing_class, change_pairs)
-              watchers && [ watchers, watcher_changes(observing_class, change_pairs.map(&:first), change) ]
+              watchers && [ watchers, change, change_pairs.map(&:first) ]
             end
           else
             watchers = watchers(observing_class, group)
-            watchers ? [ [ watchers, nil ] ] : []
+            watchers ? [ [ watchers, nil, nil ] ] : []
           end
         next if runs.empty?
 
-        run_callbacks = -> { runs.each { |watchers, watcher_changes| run_callback(callback, watchers, watcher_changes) } }
+        run_callbacks = lambda do
+          runs.each do |watchers, change, triggers|
+            run_callback(callback, watchers, change && watcher_changes(observing_class, triggers, change))
+          end
+        end
         around ? around.call(&run_callbacks) : run_callbacks.call
       end
     end
