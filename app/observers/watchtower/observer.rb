@@ -199,7 +199,7 @@ module Watchtower
     # which joins one already open, so outside a transaction each connection's records fire together when it commits.
     def record_changes(records, attributes:)
       attributes = Array(attributes).map(&:to_s)
-      watched = records.filter_map do |record|
+      watched = reload_written(records).filter_map do |record|
         triggers = triggers_for(record.class)
         next if triggers.empty?
 
@@ -216,6 +216,14 @@ module Watchtower
     end
 
     private
+
+    # `records` as the database holds them after the write, so a predicate, an `affects:` scope and the change's record
+    # read the written values. One query for each base class, and a record no longer in the database is left out.
+    def reload_written(records)
+      records.group_by { |record| record.class.base_class }.flat_map do |base_class, group|
+        base_class.unscoped.where(base_class.primary_key => group.map(&:id)).to_a
+      end
+    end
 
     # Observes the change `changed_record`'s save or destroy made (`observe`). The change is captured before anything
     # fires, so nothing a save-time trigger does to the record alters what the commit-time ones fire on.
@@ -287,8 +295,9 @@ module Watchtower
 
       connection.instance_variable_set(:@watchtower_held_changes, {})
       rows = held.values.reject(&:empty?).map do |entries|
-        change = entries.map(&:first).reduce(:merge)
-        [ change, triggers_for(change.record_type.constantize).select(&:at_commit?), entries.flat_map(&:last).uniq ]
+        # The row's class as last saved, which `becomes!` may have changed since an earlier save.
+        last_class = entries.last.first.record_type.constantize
+        [ entries.map(&:first).reduce(:merge), triggers_for(last_class).select(&:at_commit?), entries.flat_map(&:last).uniq ]
       end
       fire_at_commit(rows)
     end

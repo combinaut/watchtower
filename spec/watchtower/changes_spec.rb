@@ -442,6 +442,31 @@ RSpec.describe "Watchtower triggers on saves, moves and destroys" do
     end
   end
 
+  it "runs a subclass's trigger when a row is saved as that subclass later in the transaction" do
+    Author.watches(association: :books, callback: :touch, inline: true)
+    Author.watches(association: :novels, callback: :reindex!, inline: true)
+    book
+
+    expect do
+      Book.transaction do
+        book.update!(title: "Draft")
+        book.becomes!(Novel).save!
+      end
+    end.to reindex(author)
+  end
+
+  it "reads a polymorphic type as saved, not as an instance holds it unsaved" do
+    Author.watches(association: :comments, callback: :reindex!, inline: true)
+    comment = Comment.create!(commentable: author, body: "Hi")
+
+    expect do
+      Comment.transaction do
+        comment.update!(body: "Edited")
+        comment.commentable = book
+      end
+    end.to reindex(author)
+  end
+
   context "with a commit that changes several associated records" do
     let!(:persuasion) { Book.create!(author: author, title: "Persuasion") }
     let!(:emma) { Book.create!(author: author, title: "Emma") }

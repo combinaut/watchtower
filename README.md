@@ -421,7 +421,7 @@ Book.where(id: books.map(&:id)).update_all("title = TRIM(title)")
 Watchtower.record_changes(books, attributes: [ :title ])
 ```
 
-Each recorded change is handled like a save. Watchtower reads `enabled:` as the change is recorded, holds the change for the commit, combines it with the transaction's other changes to the same book, and drops it if its transaction or savepoint rolls back. In the example, Ada is reindexed once however many of her books were tidied. Called outside a transaction, `record_changes` opens one, so all of the records fire together.
+Watchtower reloads the records after the write, one query for each model, so `enabled:`, an `affects:` scope and the callback read the written values. Each recorded change is handled like a save. Watchtower reads `enabled:` as the change is recorded, holds the change for the commit, combines it with the transaction's other changes to the same book, and drops it if its transaction or savepoint rolls back. In the example, Ada is reindexed once however many of her books were tidied. Called outside a transaction, `record_changes` opens one, so all of the records fire together.
 
 A recorded change cannot move a record between watchers, since Watchtower cannot read the keys it had before the write. `record_changes` raises `ArgumentError`, recording nothing, for an attribute that ties a record to its watchers, e.g. `author_id`. Save such a record through its callbacks instead.
 

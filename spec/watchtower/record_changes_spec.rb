@@ -26,6 +26,15 @@ RSpec.describe "Watchtower.record_changes" do
     expect { perform_enqueued_jobs { retitle_without_callbacks(persuasion, emma) } }.to reindex(author)
   end
 
+  it "reads a record's predicate against the record as written" do
+    Author.watches(association: :books, callback: :reindex!, inline: true, enabled: :published?)
+
+    expect do
+      Book.where(id: persuasion.id).update_all(published: true)
+      Watchtower.record_changes([ persuasion ], attributes: [ :published ])
+    end.to reindex(author)
+  end
+
   it "fires at the commit of the transaction it is called in" do
     Author.watches(association: :books, callback: :reindex!, inline: true)
 

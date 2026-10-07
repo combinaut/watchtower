@@ -104,15 +104,15 @@ module Watchtower
     end
 
     # Whether the changed record can belong to the watch's association. Through a polymorphic `has_many ... as:`,
-    # e.g. `has_many :comments, as: :commentable`, a record belongs to a watcher only when its type names the
-    # watcher's model now or did before a move or destroy, so a comment on a `Book` never reaches an `Author`. Any
+    # e.g. `has_many :comments, as: :commentable`, a record belongs to a watcher only when its type as saved names the
+    # watcher's model, or did before a move or destroy, so a comment on a `Book` never reaches an `Author`. Any
     # other watch, or a change whose type is unknown, is reachable.
     def self.reachable?(watch, change)
       reflection = watch.reflection
       return true unless reflection && !reflection.through_reflection? && reflection.type
 
       type = reflection.type.to_s
-      types = [ change.record&.read_attribute(type), change.previous_foreign_keys[type] ].compact
+      types = [ change.record&.attribute_in_database(type), change.previous_foreign_keys[type] ].compact
       types.empty? || types.include?(reflection.active_record.polymorphic_name)
     end
   end
