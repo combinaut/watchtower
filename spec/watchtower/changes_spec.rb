@@ -108,6 +108,16 @@ RSpec.describe "Watchtower triggers on saves, moves and destroys" do
         expect { comment.update!(commentable: book) }.to reindex(author)
       end
 
+      it "does not look for watchers of a comment on another type" do
+        comment = Comment.create!(commentable: book, body: "Hi")
+        authors_read = 0
+        counter = ->(*, payload) { authors_read += 1 if payload[:sql].start_with?("SELECT") && payload[:sql].include?('"authors"') }
+
+        ActiveSupport::Notifications.subscribed(counter, "sql.active_record") { comment.update!(body: "Edited") }
+
+        expect(authors_read).to eq(0)
+      end
+
       it "does not run on a watcher of another type that shares the key" do
         comment = Comment.create!(commentable: Book.create!(author: other_author, title: "Same id"), body: "Hi")
         Author.where(id: comment.commentable_id).first_or_create!(name: "Shares the id")

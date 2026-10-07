@@ -76,12 +76,28 @@ module Watchtower
     end
 
     # Whether `change` fires `watch`: a destroy, a move, or a change to a watched attribute always does, and any
-    # other change does when the watch names no attributes and is not `foreign_keys_only`.
+    # other change does when the watch names no attributes and is not `foreign_keys_only`. A change can never fire a
+    # watch whose polymorphic association it does not belong to (`reachable?`).
     def self.relevant?(watch, change)
+      return false unless reachable?(watch, change)
+
       watched = watch.foreign_key_attributes + watch.attributes.map(&:to_s)
       return true if change.destroyed || change.changed_attributes.intersect?(watched)
 
       !watch.foreign_keys_only && watch.attributes.empty?
+    end
+
+    # Whether the changed record can belong to the watch's association. Through a polymorphic `has_many ... as:`,
+    # e.g. `has_many :comments, as: :commentable`, a record belongs to a watcher only when its type names the
+    # watcher's model now or did before a move or destroy, so a comment on a `Book` never reaches an `Author`. Any
+    # other watch, or a change whose type is unknown, is reachable.
+    def self.reachable?(watch, change)
+      reflection = watch.reflection
+      return true unless reflection && !reflection.through_reflection? && reflection.type
+
+      type = reflection.type.to_s
+      types = [ change.record&.read_attribute(type), change.previous_foreign_keys[type] ].compact
+      types.empty? || types.include?(reflection.active_record.polymorphic_name)
     end
   end
 end
