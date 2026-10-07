@@ -187,7 +187,7 @@ A trigger with no `enabled:` always fires.
 
 ### `at: :commit` (the default)
 
-The trigger fires once the transaction commits. Watchtower combines all of the transaction's saves of one associated record into a single change, so the callback runs once for that record, on the records that watched it before the transaction and those that watch it after. Anything in between is skipped.
+The trigger fires once the transaction commits. Watchtower combines all of the transaction's saves of one associated record into a single change, on the records that watched it before the transaction and those that watch it after. Anything in between is skipped. The callback then runs once on each watcher the transaction's changes reach, however many of its associated records changed, e.g. a transaction that retitles two of Ada's books reindexes her once.
 
 ```ruby
 watches association: :books, callback: :reindex!
@@ -228,11 +228,12 @@ A queued trigger that fires at the save enqueues a job at each save instead, and
 
 ### What fires, and how often
 
-A trigger that fires at the commit fires once for each associated record the transaction added, changed or removed, on all of its saves and destroys combined into one, even when they went through several instances of the record. It fires from a transaction callback (`current_transaction.after_commit`) once the outermost transaction commits, leaving out every save that rolled back, including one inside a savepoint (`requires_new: true`) that rolled back. A trigger that fires at the save fires once per save. Either way, each time a trigger fires, its callback runs once for each watcher the change reaches, however many of the callback's triggers the change matches among those that run the same way (see [Callbacks](#callbacks)). A change reaches the records that watched the associated record before it and those that watch it when the callback runs, which are read from the database.
+A trigger that fires at the commit fires once for the transaction, on every associated record it added, changed or removed, each record's saves and destroys combined into one, even when they went through several instances of the record. It fires from a transaction callback (`current_transaction.after_commit`) once the outermost transaction commits, leaving out every save that rolled back, including one inside a savepoint (`requires_new: true`) that rolled back. A trigger that fires at the save fires once per save. Either way, each time a trigger fires, its callback runs once for each watcher the changes reach, however many of the changes reach it and however many of the callback's triggers they match among those that run the same way (see [Callbacks](#callbacks)). A callback that takes the change runs once for each change instead (see [Knowing what changed](#knowing-what-changed)). A change reaches the records that watched the associated record before it and those that watch it when the callback runs, which are read from the database.
 
 | In one transaction | `at: :commit` | `at: :save` |
 | --- | --- | --- |
 | A book's `title` is saved twice | `reindex!` runs once on its author, after the commit | `reindex!` runs twice on its author, once for each save |
+| Two of Ada's books are retitled | `reindex!` runs once on Ada, after the commit | `reindex!` runs twice on Ada, once for each save |
 | A book moves from Ada to Grace, then to Hedy | the callback runs on Ada and Hedy. Grace held the book only inside the transaction, so nothing she derives changed | inline, the callback runs on Ada and Grace at the first save, and on Grace and Hedy at the second. Queued, each save's job runs on the book's watcher before that save and on its watcher when the job runs. With a queue in the application's database that is after the commit, so Ada and Hedy, then Grace and Hedy. A queue outside the database can run a job before the commit, when its connection still sees an earlier watcher |
 | The transaction rolls back | nothing runs | inline callbacks have already run, and only their database writes are undone; queued jobs are rolled back only by a queue in the same database |
 
@@ -274,7 +275,7 @@ Use it when the callback has to finish before the code that made the change goes
 
 #### Collecting changes across transactions
 
-Watchtower combines the saves of one book within a transaction (see [`at: :commit`](#at-commit-the-default)), but it runs the callback separately for each book and each transaction. A nightly import that saves each book in its own transaction, so that one bad row rolls back only itself, would reindex Ada once for each of her 40 books. To reindex each author once per import, your application collects the authors in a batch of its own and reindexes them when the import ends. Watchtower's part is to run the callback that adds each author to the batch. If your application rebuilds everything afterwards anyway, switch the trigger off instead (see [Gating triggers](#gating-triggers)).
+Watchtower runs the callback once per watcher for each transaction (see [`at: :commit`](#at-commit-the-default)), but each transaction runs it on its own. A nightly import that saves each book in its own transaction, so that one bad row rolls back only itself, would reindex Ada once for each of her 40 books. To reindex each author once per import, your application collects the authors in a batch of its own and reindexes them when the import ends. Watchtower's part is to run the callback that adds each author to the batch. If your application rebuilds everything afterwards anyway, switch the trigger off instead (see [Gating triggers](#gating-triggers)).
 
 ```ruby
 class Author < ApplicationRecord
@@ -321,7 +322,7 @@ end
 
 ## Wrapping the callbacks
 
-`around:` wraps all the callbacks one change runs. It is a `Proc` that takes a block. When a change fires the trigger, Watchtower calls the `Proc` once and passes it a block that runs the callback on every watcher the change reaches. Your `Proc` calls that block, and decides what happens before and after it. It is not given the watchers.
+`around:` wraps all the callbacks a trigger runs when it fires, once for a transaction's commit, or once for each save with `at: :save`. It is a `Proc` that takes a block. When the trigger fires, Watchtower calls the `Proc` once and passes it a block that runs the callback on every watcher the changes reach. Your `Proc` calls that block, and decides what happens before and after it. It is not given the watchers.
 
 A queued trigger runs its callbacks inside a `Watchtower::Job`, which your application's code never calls, so `around:` is the way to wrap them. An inline trigger runs its callbacks in the thread that made the change, and `around:` wraps them there too, so every place that saves a record gets the same wrapping without having to remember it.
 
@@ -346,13 +347,13 @@ Author.transaction do                                   # your around: Proc
 end                                                     # the 300 updates commit together
 ```
 
-`around:` covers the callbacks of one change only. Each publisher, and each transaction, gets a block of its own, so to collect the work of many changes, collect it in your application instead (see [Collecting changes across transactions](#collecting-changes-across-transactions)).
+`around:` covers the callbacks of one transaction only. Each transaction gets a block of its own, so to collect the work of many transactions, collect it in your application instead (see [Collecting changes across transactions](#collecting-changes-across-transactions)).
 
 Triggers of a model that share a callback and an `around:` run the callback once per watcher inside one block. Triggers whose `around:` differs run inside their own.
 
 ## Knowing what changed
 
-The callback is offered the watcher and the change, a `Watchtower::WatcherChange` describing how the change affected that watcher. A proc receives both, and a method on the watcher receives the change as its argument.
+The callback is offered the watcher and the change, a `Watchtower::WatcherChange` describing how the change affected that watcher. A proc receives both, and a method on the watcher receives the change as its argument. A callback that takes the change runs once for each change that reaches the watcher, so a transaction that retitles two of Ada's books runs it on Ada twice, once with each change.
 
 ```ruby
 class Author < ApplicationRecord

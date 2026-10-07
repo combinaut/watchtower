@@ -1,17 +1,27 @@
 module Watchtower
   # Used to run triggers on a change.
   module Dispatch
-    # Runs each of `triggers` that `change` is relevant to on each of its watchers. Triggers sharing an
-    # observing class, a callback and an `around:` run the callback once per record, all of it inside that
-    # `around:` when they declare one. A callback that wants the change (`Helpers.callback_wants_change?`) is also
-    # given the `Watchtower::WatcherChange` for each record, which is built only then (`watcher_changes`).
-    def self.run(triggers, change)
-      triggers.group_by { |trigger| [ trigger.observing_class, trigger.callback, trigger.around ] }.each do |(observing_class, callback, around), group|
-        watchers = watchers(observing_class, group, change)
-        next unless watchers
+    # Runs triggers on the watchers their changes reach, given as `[trigger, change]` pairs: each change a commit
+    # fires a trigger on, or the one change a save fires it on. Triggers sharing an observing class, a callback and an
+    # `around:` form a group, which runs inside one `around:` when it declares one. A callback that does not want the
+    # change runs once per watcher however many of the group's changes reach it, and the group's watchers are found
+    # together (`watchers`). A callback that wants the change (`Helpers.callback_wants_change?`) runs once per watcher
+    # for each change that reaches it, given the `Watchtower::WatcherChange` for that change (`watcher_changes`).
+    def self.run(pairs)
+      pairs.group_by { |trigger, _change| [ trigger.observing_class, trigger.callback, trigger.around ] }.each do |(observing_class, callback, around), group|
+        runs =
+          if Helpers.callback_wants_change?(callback, observing_class)
+            group.group_by(&:last).filter_map do |change, change_pairs|
+              watchers = watchers(observing_class, change_pairs)
+              watchers && [ watchers, watcher_changes(observing_class, change_pairs.map(&:first), change) ]
+            end
+          else
+            watchers = watchers(observing_class, group)
+            watchers ? [ [ watchers, nil ] ] : []
+          end
+        next if runs.empty?
 
-        watcher_changes = watcher_changes(observing_class, group, change) if Helpers.callback_wants_change?(callback, observing_class)
-        run_callbacks = -> { run_callback(callback, watchers, watcher_changes) }
+        run_callbacks = -> { runs.each { |watchers, watcher_changes| run_callback(callback, watchers, watcher_changes) } }
         around ? around.call(&run_callbacks) : run_callbacks.call
       end
     end
@@ -63,15 +73,21 @@ module Watchtower
       after ? :added : :removed
     end
 
-    def self.watchers(observing_class, triggers, change)
+    # The watchers the `[trigger, change]` pairs reach, as one relation, or nil when none can be reached. Each watch
+    # of each trigger looks its watchers up once for all of the changes it is relevant to (`Watchers#scopes`).
+    def self.watchers(observing_class, pairs)
       primary_key = observing_class.arel_table[observing_class.primary_key]
-      scopes = triggers.flat_map do |trigger|
-        change.watches_of(trigger).select { |watch| relevant?(watch, change) }.flat_map { |watch| Watchers.new(trigger, watch).scopes(change) }
+      scopes = pairs.group_by(&:first).flat_map do |trigger, trigger_pairs|
+        changes = trigger_pairs.map(&:last)
+        trigger.watches.flat_map do |watch|
+          reaching = changes.select { |change| change.watches_of(trigger).include?(watch) && relevant?(watch, change) }
+          reaching.empty? ? [] : Watchers.new(trigger, watch).scopes(reaching)
+        end
       end
       return nil if scopes.empty?
 
       watchers = scopes.map { |scope| observing_class.where(observing_class.primary_key => scope.select(primary_key)) }.reduce(:or)
-      includes = triggers.filter_map(&:includes)
+      includes = pairs.map(&:first).uniq.filter_map(&:includes)
       includes.any? ? watchers.includes(*includes) : watchers
     end
 

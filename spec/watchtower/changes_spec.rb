@@ -441,4 +441,80 @@ RSpec.describe "Watchtower triggers on saves, moves and destroys" do
       enabled = true
     end
   end
+
+  context "with a commit that changes several associated records" do
+    let!(:persuasion) { Book.create!(author: author, title: "Persuasion") }
+    let!(:emma) { Book.create!(author: author, title: "Emma") }
+    let!(:middlemarch) { Book.create!(author: other_author, title: "Middlemarch") }
+
+    def retitle_all
+      Book.transaction do
+        persuasion.update!(title: "Persuasion: A Novel")
+        emma.update!(title: "Emma: A Novel")
+        middlemarch.update!(title: "Middlemarch: A Study")
+      end
+    end
+
+    it "runs a queued callback once per watcher, in one job" do
+      Author.watches(association: :books, callback: :reindex!)
+      clear_enqueued_jobs
+
+      expect { retitle_all }.to have_enqueued_job(Watchtower::Job).exactly(:once)
+      expect { perform_enqueued_jobs }.to reindex(author, other_author)
+    end
+
+    it "runs an inline callback once per watcher" do
+      Author.watches(association: :books, callback: :reindex!, inline: true)
+
+      expect { retitle_all }.to reindex(author, other_author)
+    end
+
+    it "finds the watchers of every change with one query" do
+      Author.watches(association: :books, callback: :reindex!, inline: true)
+      authors_read = 0
+      counter = ->(*, payload) { authors_read += 1 if payload[:sql].start_with?("SELECT") && payload[:sql].include?('"authors"') }
+
+      ActiveSupport::Notifications.subscribed(counter, "sql.active_record") { retitle_all }
+
+      expect(authors_read).to eq(1)
+    end
+
+    it "gives a callback that wants the change each change that reaches the watcher" do
+      seen = []
+      Author.watches(association: :books, callback: ->(watcher, change) { seen << [ watcher.name, change.record_id ] }, inline: true)
+
+      retitle_all
+
+      expect(seen).to contain_exactly([ "Ada", persuasion.id ], [ "Ada", emma.id ], [ "Grace", middlemarch.id ])
+    end
+
+    it "wraps all of the commit's callbacks in one around: block" do
+      calls = []
+      wrap = lambda do |&run|
+        calls << :open
+        run.call
+        calls << :close
+      end
+      Author.watches(association: :books, callback: ->(watcher) { calls << watcher.name }, inline: true, around: wrap)
+
+      retitle_all
+
+      expect(calls).to match([ :open, "Ada", "Grace", :close ]).or match([ :open, "Grace", "Ada", :close ])
+    end
+
+    it "runs only on the watchers of the changes that enabled the trigger" do
+      enabled = true
+      Author.watches(association: :books, callback: :reindex!, enabled: -> { enabled })
+      clear_enqueued_jobs
+
+      Book.transaction do
+        persuasion.update!(title: "Persuasion: A Novel")
+        enabled = false
+        middlemarch.update!(title: "Middlemarch: A Study")
+        enabled = true
+      end
+
+      expect { perform_enqueued_jobs }.to reindex(author).and not_reindex(other_author)
+    end
+  end
 end
