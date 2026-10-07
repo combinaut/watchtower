@@ -313,10 +313,22 @@ module Watchtower
 
     # Fires a commit's `rows`, each `[change, at: :commit triggers, enabled declarations]`, in this thread: the
     # enabled inline triggers run here, on every row together, after any run whose callback made the commit
-    # (`Dispatch.run_after_current`), and the enabled queued ones in one `Watchtower::Job`.
+    # (`Dispatch.run_after_current`), and the enabled queued ones in one `Watchtower::Job`. The changes have
+    # committed, so the job is enqueued even when an inline callback raises, and the callback's error is raised
+    # after it. An error enqueueing the job then is logged.
     def fire_at_commit(rows)
-      Dispatch.run_after_current(rows.flat_map { |change, triggers, enabled| triggers.select { |trigger| trigger.inline && enabled.include?(trigger.declaration) }.map { |trigger| [ trigger, change ] } })
-      enqueue(:commit, rows.map { |change, triggers, enabled| [ change, triggers.reject(&:inline), enabled ] })
+      queued = rows.map { |change, triggers, enabled| [ change, triggers.reject(&:inline), enabled ] }
+      begin
+        Dispatch.run_after_current(rows.flat_map { |change, triggers, enabled| triggers.select { |trigger| trigger.inline && enabled.include?(trigger.declaration) }.map { |trigger| [ trigger, change ] } })
+      rescue StandardError => error
+        begin
+          enqueue(:commit, queued)
+        rescue StandardError => enqueue_error
+          Rails.logger.error { "Watchtower could not enqueue a job after a callback failed: #{enqueue_error.class}: #{enqueue_error.message}" }
+        end
+        raise error
+      end
+      enqueue(:commit, queued)
     end
 
     # Queues one `Watchtower::Job` for the `rows`, each `[change, queued triggers, enabled declarations]`, that fire

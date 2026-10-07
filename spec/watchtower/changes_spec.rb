@@ -567,6 +567,27 @@ RSpec.describe "Watchtower triggers on saves, moves and destroys" do
       expect(log).to eq([ persuasion.id, emma.id, middlemarch.id, daniel_deronda.id ])
     end
 
+    it "queues a commit's queued triggers when an inline callback on it raises" do
+      Author.watches(association: :books, callback: ->(*) { raise "callback failed" }, inline: true)
+      Author.watches(association: :books, callback: :reindex!)
+
+      expect do
+        expect { persuasion.update!(title: "Persuasion: A Novel") }.to raise_error("callback failed")
+      end.to have_enqueued_job(Watchtower::Job).exactly(:once)
+    end
+
+    it "queues a commit's queued triggers when the inline triggers on a callback's save raise" do
+      Author.watches(association: :books, callback: lambda { |_watcher, change|
+        emma.update!(title: "Emma: A Novel") if change.record_id == persuasion.id
+        raise "callback failed" if change.record_id == emma.id
+      }, inline: true)
+      Author.watches(association: :books, callback: :reindex!)
+
+      expect do
+        expect { persuasion.update!(title: "Persuasion: A Novel") }.to raise_error("callback failed")
+      end.to have_enqueued_job(Watchtower::Job).exactly(:twice)
+    end
+
     it "runs a save's inline triggers before the save returns after a callback's save raised in its triggers" do
       Author.watches(association: :books, callback: lambda { |_watcher, change|
         log << change.record_id
