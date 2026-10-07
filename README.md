@@ -26,7 +26,7 @@ A trigger can also:
 ## How it works
 
 1. `watches(...)` registers a **trigger**, and tells Watchtower to observe the records of the association it names (`association:`), or the class an `affects:` scope reads (`class:`).
-2. When one of those records is added, changed or removed, an [`ActiveRecord::Observer`](https://github.com/rails/rails-observers) hook records the change (the associated record's class, id and changed attributes, and the foreign keys that tied it to its watchers before it moved or was destroyed). By default Watchtower combines a transaction's changes to a record and runs the callback once the transaction commits. A trigger can instead run one callback for each save (see [Choosing when a trigger fires](#choosing-when-a-trigger-fires)).
+2. When one of those records is added, changed or removed, an [`ActiveRecord::Observer`](https://github.com/rails/rails-observers) hook records the change (the associated record's class, id and changed attributes, and the foreign keys that tied it to its watchers before it moved or was destroyed). By default Watchtower combines a transaction's changes to a record and runs the callback once the transaction commits. A trigger can instead run one callback for each save (see [Choosing when a trigger fires](#choosing-when-a-trigger-fires)). A write that skips callbacks, e.g. `update_all`, is recorded with `Watchtower.record_changes` (see [Changes made without callbacks](#changes-made-without-callbacks)).
 3. Watchtower finds the **watchers** the change reaches, the records whose model declared the trigger, and runs the callback on each.
 
 ## Installation
@@ -409,6 +409,21 @@ When an associated record is removed from a watcher, the association join no lon
 - **Records an association passes through.** For `has_many :reviews, through: :books`, moving or destroying a `Book` changes an author's reviews without any `Review` saving, so a trigger on `:reviews` also watches `Book`. Only a change to the `Book`'s foreign keys fires it (its `author_id`, or for `has_many :publishers, through: :books`, its `publisher_id`), not every `Book` save. A trigger declared before its association (with `class:`) starts watching the record it passes through the next time the observer reinitializes after the association exists. The observer reinitializes once the application has initialized, and whenever a new trigger watches a class it does not yet observe.
 
 For a queued trigger, the watchers before the change are found from the foreign keys the change carries, not queried in the thread that made the change, so a save costs no more reads with a trigger than without one. The one exception is an `affects:` trigger on a destroyed record, whose scope is evaluated at the destroy, since the job can no longer load the record.
+
+## Changes made without callbacks
+
+Watchtower sees a change through the record's `after_save` and `after_destroy` callbacks, so a write that skips them, e.g. `update_all`, `update_columns` or `insert_all`, fires no trigger. `Watchtower.record_changes` tells Watchtower about such a write, and the triggers watching the records then fire as they would for a save of the named attributes.
+
+```ruby
+# Tidy every title in one statement, then let each author's triggers fire.
+books = Book.where("title LIKE ' %'").to_a
+Book.where(id: books.map(&:id)).update_all("title = TRIM(title)")
+Watchtower.record_changes(books, attributes: [ :title ])
+```
+
+Each recorded change is handled like a save. Watchtower reads `enabled:` as the change is recorded, holds the change for the commit, combines it with the transaction's other changes to the same book, and drops it if its transaction or savepoint rolls back. In the example, Ada is reindexed once however many of her books were tidied. Called outside a transaction, `record_changes` opens one, so all of the records fire together.
+
+A recorded change cannot move a record between watchers, since Watchtower cannot read the keys it had before the write. `record_changes` raises `ArgumentError`, recording nothing, for an attribute that ties a record to its watchers, e.g. `author_id`. Save such a record through its callbacks instead.
 
 ## Asynchronous processing
 

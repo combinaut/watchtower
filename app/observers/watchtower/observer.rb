@@ -192,6 +192,24 @@ module Watchtower
       observe_change(changed_record, destroyed: true)
     end
 
+    # Records that `attributes` of `records` changed without Active Record callbacks, e.g. by `update_all`, so their
+    # watchers' triggers fire as they would for a save of those attributes (see `Watchtower.record_changes`). Raises
+    # `ArgumentError`, before recording anything, for an attribute that ties a record to its watchers, since the
+    # watchers it was moved from are unknown.
+    def record_changes(records, attributes:)
+      attributes = Array(attributes).map(&:to_s)
+      watched = records.filter_map do |record|
+        triggers = triggers_for(record.class)
+        next if triggers.empty?
+
+        moving = triggers.flat_map { |trigger| trigger.watches_on(record.class) }.flat_map(&:foreign_key_attributes) & attributes
+        raise ArgumentError, "cannot record a change to #{moving.join(', ')} on #{record.class.name}: it moves the record between watchers" if moving.any?
+
+        [ record, triggers ]
+      end
+      watched.each { |record, triggers| observe(record, Change.recorded(record, attributes), triggers) }
+    end
+
     private
 
     # Holds the change for the `at: :commit` triggers until the transaction it was made in commits (`hold_for_commit`),
@@ -205,7 +223,10 @@ module Watchtower
       triggers = triggers_for(changed_record.class)
       return if triggers.empty?
 
-      change = Change.capture(changed_record, triggers, destroyed: destroyed, resolve_affects: destroyed)
+      observe(changed_record, Change.capture(changed_record, triggers, destroyed: destroyed, resolve_affects: destroyed), triggers)
+    end
+
+    def observe(changed_record, change, triggers)
       at_commit, at_save = triggers.partition(&:at_commit?)
       if at_commit.any?
         enabled = []
