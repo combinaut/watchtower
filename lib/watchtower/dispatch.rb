@@ -21,26 +21,31 @@ module Watchtower
     # is not part of this run. Its commit-time triggers run after this run (`run_after_current`), and a run started
     # during this one's callbacks, as a save starts its `at: :save` triggers', runs at once, inside it.
     def self.run(pairs)
-      return run_groups(pairs) if running?
-
-      begin
-        self.deferred_runs = []
-        run_groups(pairs)
-      ensure
-        run_deferred
-      end
+      running? ? run_groups(pairs) : run_outermost(pairs)
     end
 
     def self.running?
       !deferred_runs.nil?
     end
 
-    # Runs the runs waiting for the current one (`run_after_current`), including those they start, even when a
-    # callback of the current one raised, since their changes have committed. A run that raises stops the rest.
-    def self.run_deferred
-      while (pairs = deferred_runs.shift)
-        run_groups(pairs)
+    # Runs `pairs`, then the runs waiting for it (`run_after_current`), including those they start. Each run's changes
+    # have committed, so every one runs even when one before it raised, and the first error is raised once they all
+    # have. A later error is logged.
+    def self.run_outermost(pairs)
+      self.deferred_runs = [ pairs ]
+      first_error = nil
+      while (next_pairs = deferred_runs.shift)
+        begin
+          run_groups(next_pairs)
+        rescue StandardError => error
+          if first_error
+            Rails.logger.error { "Watchtower callback failed after an earlier one: #{error.class}: #{error.message}" }
+          else
+            first_error = error
+          end
+        end
       end
+      raise first_error if first_error
     ensure
       self.deferred_runs = nil
     end

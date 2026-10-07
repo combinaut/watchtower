@@ -554,6 +554,19 @@ RSpec.describe "Watchtower triggers on saves, moves and destroys" do
       expect(log).to eq([ persuasion.id, emma.id ])
     end
 
+    it "runs every waiting run when an earlier one raises, and raises the first error" do
+      middlemarch = Book.create!(author: author, title: "Middlemarch")
+      daniel_deronda = Book.create!(author: author, title: "Daniel Deronda")
+      Author.watches(association: :books, callback: lambda { |_watcher, change|
+        log << change.record_id
+        [ emma, middlemarch, daniel_deronda ].each { |book| book.update!(title: "#{book.title}: A Novel") } if change.record_id == persuasion.id
+        raise "#{change.record_id} failed" if [ emma.id, middlemarch.id ].include?(change.record_id)
+      }, inline: true)
+
+      expect { persuasion.update!(title: "Persuasion: A Novel") }.to raise_error("#{emma.id} failed")
+      expect(log).to eq([ persuasion.id, emma.id, middlemarch.id, daniel_deronda.id ])
+    end
+
     it "runs a save's inline triggers before the save returns after a callback's save raised in its triggers" do
       Author.watches(association: :books, callback: lambda { |_watcher, change|
         log << change.record_id
