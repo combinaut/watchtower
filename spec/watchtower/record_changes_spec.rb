@@ -90,6 +90,13 @@ RSpec.describe "Watchtower.record_changes" do
       .and not_reindex(author)
   end
 
+  it "fires commit-time triggers when the observer records a change outside a transaction" do
+    Author.watches(association: :books, callback: :reindex!, inline: true)
+    Book.where(id: persuasion.id).update_all(title: "Retitled")
+
+    expect { Watchtower::Observer.instance.record_changes([ persuasion ], attributes: [ :title ]) }.to reindex(author)
+  end
+
   it "does nothing for records no trigger watches" do
     expect { Watchtower.record_changes([ other_author ], attributes: [ :name ]) }.not_to raise_error
   end

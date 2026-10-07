@@ -10,15 +10,15 @@ module Watchtower
       @watch = watch
     end
 
-    # The relations of the observing class that hold the watchers any of `changes` reaches. Each kind of lookup, the
-    # current watchers, the previous watchers by foreign key and those of destroyed sources, is one relation for all of
-    # `changes`, except an `affects:` scope, which is evaluated for each change.
+    # The relations of the observing class that hold the watchers any of `changes` reaches. Each kind of lookup (the
+    # current watchers, the previous watchers by foreign key or `affects:` ids, and those of destroyed sources) is one
+    # relation for all of `changes`. An `affects:` scope is the exception, evaluated for each change.
     def scopes(changes)
       [ *current_scopes(changes), *previous_scopes(changes) ]
     end
 
-    # The watchers the record has after the change: none once it is destroyed, or, unless the observing class `belongs_to` it,
-    # once it can no longer be loaded.
+    # The watchers the record has after the change: none once it is destroyed, or, unless the observing class
+    # `belongs_to` it, once it can no longer be loaded.
     def after(change)
       return observing_class.none if change.destroyed
 

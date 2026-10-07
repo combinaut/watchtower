@@ -13,14 +13,12 @@ require "watchtower/active_record"
 
 module Watchtower
   # Records that `attributes` of `records` changed without Active Record callbacks, e.g. by `update_all`, so the
-  # triggers watching them fire as they would for a save of those attributes: each `enabled:` read now, the change
-  # held for the commit and combined with the transaction's other changes to the same rows, and dropped if its
-  # transaction or savepoint rolls back. Outside a transaction, opens one, so all of `records` fire together. Raises
-  # `ArgumentError` for an attribute that ties a record to its watchers.
+  # triggers watching them fire as they would for a save of those attributes. Each `enabled:` is read now, and the
+  # change is held for the commit, combined with the transaction's other changes to the same rows, and dropped if its
+  # transaction or savepoint rolls back. Outside a transaction, the records on each connection fire together once a
+  # transaction opened for them commits. Raises `ArgumentError`, recording nothing, for an attribute that ties a record
+  # to its watchers.
   def self.record_changes(records, attributes:)
-    records = records.to_a
-    return if records.empty?
-
-    records.first.class.transaction { Observer.instance.record_changes(records, attributes: attributes) }
+    Observer.instance.record_changes(records.to_a, attributes: attributes)
   end
 end

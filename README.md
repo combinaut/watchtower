@@ -18,15 +18,15 @@ If you are looking to react to a record's own changes, its own callbacks will se
 A trigger can also:
 
 - be switched off for the changes made inside a block (see [Gating triggers](#gating-triggers))
-- run once when the transaction commits, for all of a record's saves combined, or once for each save (see [Choosing when a trigger fires](#choosing-when-a-trigger-fires))
+- run once when the transaction commits, for all of its changes combined, or once for each save (see [Choosing when a trigger fires](#choosing-when-a-trigger-fires))
 - run its callback in a background job, or inline in the thread that made the change (see [Running inline](#running-inline))
-- wrap all the callbacks of one change in a block (see [Wrapping the callbacks](#wrapping-the-callbacks))
+- wrap all the callbacks a trigger runs when it fires in a block (see [Wrapping the callbacks](#wrapping-the-callbacks))
 - tell its callback whether the associated record was added, changed or removed, and where it came from or went to (see [Knowing what changed](#knowing-what-changed))
 
 ## How it works
 
 1. `watches(...)` registers a **trigger**, and tells Watchtower to observe the records of the association it names (`association:`), or the class an `affects:` scope reads (`class:`).
-2. When one of those records is added, changed or removed, an [`ActiveRecord::Observer`](https://github.com/rails/rails-observers) hook records the change (the associated record's class, id and changed attributes, and the foreign keys that tied it to its watchers before it moved or was destroyed). By default Watchtower combines a transaction's changes to a record and runs the callback once the transaction commits. A trigger can instead run one callback for each save (see [Choosing when a trigger fires](#choosing-when-a-trigger-fires)). A write that skips callbacks, e.g. `update_all`, is recorded with `Watchtower.record_changes` (see [Changes made without callbacks](#changes-made-without-callbacks)).
+2. When one of those records is added, changed or removed, an [`ActiveRecord::Observer`](https://github.com/rails/rails-observers) hook records the change (the associated record's class, id and changed attributes, and the foreign keys that tied it to its watchers before it moved or was destroyed). By default Watchtower combines a transaction's changes to a record and runs the callback once the transaction commits. A trigger can instead run one callback for each save (see [Choosing when a trigger fires](#choosing-when-a-trigger-fires)). A write that skips callbacks, e.g. `update_all`, fires triggers only when recorded with `Watchtower.record_changes` (see [Changes made without callbacks](#changes-made-without-callbacks)).
 3. Watchtower finds the **watchers** the change reaches, the records whose model declared the trigger, and runs the callback on each.
 
 ## Installation
@@ -74,7 +74,7 @@ end
 | `enabled:` | Whether Watchtower runs the callback for a change, read as the change is made (see [Gating triggers](#gating-triggers)). Defaults to always running it. |
 | `at:` | When the trigger fires, `:commit` once the transaction commits or `:save` at each save (see [Choosing when a trigger fires](#choosing-when-a-trigger-fires)). Defaults to `:commit`. |
 | `inline:` | Run the callback in the thread that made the change instead of in a job (see [Running inline](#running-inline)). Defaults to `false`. |
-| `around:` | A `Proc` that wraps all the callbacks one change runs, e.g. in a transaction (see [Wrapping the callbacks](#wrapping-the-callbacks)). |
+| `around:` | A `Proc` that wraps all the callbacks a trigger runs when it fires, e.g. in a transaction (see [Wrapping the callbacks](#wrapping-the-callbacks)). |
 
 ### Finding the watchers: `association:` vs `affects:`
 
@@ -187,7 +187,7 @@ A trigger with no `enabled:` always fires.
 
 ### `at: :commit` (the default)
 
-The trigger fires once the transaction commits. Watchtower combines all of the transaction's saves of one associated record into a single change, on the records that watched it before the transaction and those that watch it after. Anything in between is skipped. The callback then runs once on each watcher the transaction's changes reach, however many of its associated records changed, e.g. a transaction that retitles two of Ada's books reindexes her once.
+The trigger fires once the transaction commits. Watchtower combines all of the transaction's saves of one associated record into a single change, which reaches the records that watched it before the transaction and those that watch it after. Anything in between is skipped. The callback then runs once on each watcher the transaction's changes reach, however many of its associated records changed, e.g. a transaction that retitles two of Ada's books reindexes her once.
 
 ```ruby
 watches association: :books, callback: :reindex!
@@ -247,7 +247,7 @@ By default the callback runs in a `Watchtower::Job` (see [Asynchronous processin
 watches association: :books, callback: :reindex!
 ```
 
-In the example, the commit enqueues one job for Persuasion, and the job runs:
+In the example, the commit enqueues one job for the transaction, and the job runs:
 
 ```ruby
 ada.reindex!     # in a job, after the commit
@@ -275,7 +275,7 @@ Use it when the callback has to finish before the code that made the change goes
 
 #### Collecting changes across transactions
 
-Watchtower runs the callback once per watcher for each transaction (see [`at: :commit`](#at-commit-the-default)), but each transaction runs it on its own. A nightly import that saves each book in its own transaction, so that one bad row rolls back only itself, would reindex Ada once for each of her 40 books. To reindex each author once per import, your application collects the authors in a batch of its own and reindexes them when the import ends. Watchtower's part is to run the callback that adds each author to the batch. If your application rebuilds everything afterwards anyway, switch the trigger off instead (see [Gating triggers](#gating-triggers)).
+Watchtower runs the callback once per watcher for each transaction (see [`at: :commit`](#at-commit-the-default)), but not across transactions. A nightly import that saves each book in its own transaction, so that one bad row rolls back only itself, would reindex Ada once for each of her 40 books. To reindex each author once per import, your application collects the authors in a batch of its own and reindexes them when the import ends. Watchtower's part is to run the callback that adds each author to the batch. If your application rebuilds everything afterwards anyway, switch the trigger off instead (see [Gating triggers](#gating-triggers)).
 
 ```ruby
 class Author < ApplicationRecord
@@ -347,7 +347,7 @@ Author.transaction do                                   # your around: Proc
 end                                                     # the 300 updates commit together
 ```
 
-`around:` covers the callbacks of one transaction only. Each transaction gets a block of its own, so to collect the work of many transactions, collect it in your application instead (see [Collecting changes across transactions](#collecting-changes-across-transactions)).
+`around:` covers the callbacks of one commit only, or of one save with `at: :save`. Each transaction gets a block of its own, so to collect the work of many transactions, collect it in your application instead (see [Collecting changes across transactions](#collecting-changes-across-transactions)).
 
 Triggers of a model that share a callback and an `around:` run the callback once per watcher inside one block. Triggers whose `around:` differs run inside their own.
 

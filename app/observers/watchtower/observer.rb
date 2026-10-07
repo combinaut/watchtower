@@ -195,7 +195,8 @@ module Watchtower
     # Records that `attributes` of `records` changed without Active Record callbacks, e.g. by `update_all`, so their
     # watchers' triggers fire as they would for a save of those attributes (see `Watchtower.record_changes`). Raises
     # `ArgumentError`, before recording anything, for an attribute that ties a record to its watchers, since the
-    # watchers it was moved from are unknown.
+    # watchers it was moved from are unknown. The records on each connection are recorded inside a transaction on it,
+    # which joins one already open, so outside a transaction each connection's records fire together when it commits.
     def record_changes(records, attributes:)
       attributes = Array(attributes).map(&:to_s)
       watched = records.filter_map do |record|
@@ -207,18 +208,17 @@ module Watchtower
 
         [ record, triggers ]
       end
-      watched.each { |record, triggers| observe(record, Change.recorded(record, attributes), triggers) }
+      watched.group_by { |record, _triggers| record.class.connection }.each_value do |group|
+        group.first.first.class.transaction do
+          group.each { |record, triggers| observe(record, Change.recorded(record, attributes), triggers) }
+        end
+      end
     end
 
     private
 
-    # Holds the change for the `at: :commit` triggers until the transaction it was made in commits (`hold_for_commit`),
-    # and fires the `at: :save` triggers on it now (`fire_at_save`). Every trigger's `enabled` predicate is read during
-    # the save, in the thread that made the change, while any caller-set context, such as a thread-local set around a
-    # block of writes, is still live. A block around the save therefore gates its triggers even when the transaction
-    # commits after the block. The commit-time predicates are read before any save-time trigger runs. The change is
-    # captured before anything fires, so nothing a save-time trigger does to the record alters what the commit-time
-    # ones fire on.
+    # Observes the change `changed_record`'s save or destroy made (`observe`). The change is captured before anything
+    # fires, so nothing a save-time trigger does to the record alters what the commit-time ones fire on.
     def observe_change(changed_record, destroyed:)
       triggers = triggers_for(changed_record.class)
       return if triggers.empty?
@@ -226,6 +226,11 @@ module Watchtower
       observe(changed_record, Change.capture(changed_record, triggers, destroyed: destroyed, resolve_affects: destroyed), triggers)
     end
 
+    # Holds `change` for the `at: :commit` triggers until the transaction it was made in commits (`hold_for_commit`),
+    # and fires the `at: :save` triggers on it now (`fire_at_save`). Every trigger's `enabled` predicate is read now,
+    # in the thread that made the change, while any caller-set context, such as a thread-local set around a block of
+    # writes, is still live. A block around the save therefore gates its triggers even when the transaction commits
+    # after the block. The commit-time predicates are read before any save-time trigger runs.
     def observe(changed_record, change, triggers)
       at_commit, at_save = triggers.partition(&:at_commit?)
       if at_commit.any?
@@ -272,7 +277,8 @@ module Watchtower
 
     # Fires the `at: :commit` triggers on the rows the held changes touch, each row's changes merged into one: every
     # attribute they changed, and the watchers the row had before the earliest of them (`Change#merge`). A trigger
-    # fires on a row when any of the row's held changes enabled it. The held changes are taken before anything fires,
+    # fires on a row when any of the row's held changes enabled it, and all of the rows fire together
+    # (`fire_at_commit`). The held changes are taken before anything fires,
     # so a change a callback makes is held for its own transaction's commit. Every save in a transaction registers a
     # flush, and the first to run takes every held change, so the rest find none.
     def flush(connection)
