@@ -38,9 +38,9 @@ module Watchtower
       )
     end
 
-    # The change to `attributes` of `record` written without callbacks (`Observer#record_changes`). It moves the
+    # The change to `attributes` of `record` written without callbacks (`Observer#report_changes`). It moves the
     # record nowhere, so it carries no previous foreign keys.
-    def self.recorded(record, attributes)
+    def self.reported(record, attributes)
       new(
         record_class: record.class.base_class.name,
         record_type: record.class.name,

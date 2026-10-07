@@ -16,9 +16,9 @@ module Watchtower
   # triggers watching them fire as they would for a save of those attributes. Each `enabled:` is read now, and the
   # change is held for the commit, combined with the transaction's other changes to the same rows, and dropped if its
   # transaction or savepoint rolls back. Outside a transaction, the records on each connection fire together once a
-  # transaction opened for them commits. Raises `ArgumentError`, recording nothing, for an attribute that ties a record
+  # transaction opened for them commits. Raises `ArgumentError`, reporting nothing, for an attribute that ties a record
   # to its watchers.
-  def self.record_changes(records, attributes:)
-    Observer.instance.record_changes(records.to_a, attributes: attributes)
+  def self.report_changes(records, attributes:)
+    Observer.instance.report_changes(records.to_a, attributes: attributes)
   end
 end

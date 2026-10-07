@@ -193,24 +193,24 @@ module Watchtower
     end
 
     # Records that `attributes` of `records` changed without Active Record callbacks, e.g. by `update_all`, so their
-    # watchers' triggers fire as they would for a save of those attributes (see `Watchtower.record_changes`). Raises
-    # `ArgumentError`, before recording anything, for an attribute that ties a record to its watchers, since the
-    # watchers it was moved from are unknown. The records on each connection are recorded inside a transaction on it,
+    # watchers' triggers fire as they would for a save of those attributes (see `Watchtower.report_changes`). Raises
+    # `ArgumentError`, before reporting anything, for an attribute that ties a record to its watchers, since the
+    # watchers it was moved from are unknown. The records on each connection are reported inside a transaction on it,
     # which joins one already open, so outside a transaction each connection's records fire together when it commits.
-    def record_changes(records, attributes:)
+    def report_changes(records, attributes:)
       attributes = Array(attributes).map(&:to_s)
       watched = reload_written(records).filter_map do |record|
         triggers = triggers_for(record.class)
         next if triggers.empty?
 
         moving = triggers.flat_map { |trigger| trigger.watches_on(record.class) }.flat_map(&:foreign_key_attributes) & attributes
-        raise ArgumentError, "cannot record a change to #{moving.join(', ')} on #{record.class.name}: it moves the record between watchers" if moving.any?
+        raise ArgumentError, "cannot report a change to #{moving.join(', ')} on #{record.class.name}: it moves the record between watchers" if moving.any?
 
         [ record, triggers ]
       end
       watched.group_by { |record, _triggers| record.class.connection }.each_value do |group|
         group.first.first.class.transaction do
-          group.each { |record, triggers| observe(record, Change.recorded(record, attributes), triggers) }
+          group.each { |record, triggers| observe(record, Change.reported(record, attributes), triggers) }
         end
       end
     end

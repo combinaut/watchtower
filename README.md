@@ -26,7 +26,7 @@ A trigger can also:
 ## How it works
 
 1. `watches(...)` registers a **trigger**, and tells Watchtower to observe the records of the association it names (`association:`), or the class an `affects:` scope reads (`class:`).
-2. When one of those records is added, changed or removed, an [`ActiveRecord::Observer`](https://github.com/rails/rails-observers) hook records the change (the associated record's class, id and changed attributes, and the foreign keys that tied it to its watchers before it moved or was destroyed). By default Watchtower combines a transaction's changes to a record and runs the callback once the transaction commits. A trigger can instead run one callback for each save (see [Choosing when a trigger fires](#choosing-when-a-trigger-fires)). A write that skips callbacks, e.g. `update_all`, fires triggers only when recorded with `Watchtower.record_changes` (see [Changes made without callbacks](#changes-made-without-callbacks)).
+2. When one of those records is added, changed or removed, an [`ActiveRecord::Observer`](https://github.com/rails/rails-observers) hook records the change (the associated record's class, id and changed attributes, and the foreign keys that tied it to its watchers before it moved or was destroyed). By default Watchtower combines a transaction's changes to a record and runs the callback once the transaction commits. A trigger can instead run one callback for each save (see [Choosing when a trigger fires](#choosing-when-a-trigger-fires)). A write that skips callbacks, e.g. `update_all`, fires triggers only when reported with `Watchtower.report_changes` (see [Changes made without callbacks](#changes-made-without-callbacks)).
 3. Watchtower finds the **watchers** the change reaches, the records whose model declared the trigger, and runs the callback on each.
 
 ## Installation
@@ -412,18 +412,18 @@ For a queued trigger, the watchers before the change are found from the foreign 
 
 ## Changes made without callbacks
 
-Watchtower sees a change through the record's `after_save` and `after_destroy` callbacks, so a write that skips them, e.g. `update_all`, `update_columns` or `insert_all`, fires no trigger. `Watchtower.record_changes` tells Watchtower about such a write, and the triggers watching the records then fire as they would for a save of the named attributes.
+Watchtower sees a change through the record's `after_save` and `after_destroy` callbacks, so a write that skips them, e.g. `update_all`, `update_columns` or `insert_all`, fires no trigger. `Watchtower.report_changes` tells Watchtower about such a write, and the triggers watching the records then fire as they would for a save of the named attributes.
 
 ```ruby
 # Tidy every title in one statement, then let each author's triggers fire.
 books = Book.where("title LIKE ' %'").to_a
 Book.where(id: books.map(&:id)).update_all("title = TRIM(title)")
-Watchtower.record_changes(books, attributes: [ :title ])
+Watchtower.report_changes(books, attributes: [ :title ])
 ```
 
-Watchtower reloads the records after the write, one query for each model, so `enabled:`, an `affects:` scope and the callback read the written values. Each recorded change is handled like a save. Watchtower reads `enabled:` as the change is recorded, holds the change for the commit, combines it with the transaction's other changes to the same book, and drops it if its transaction or savepoint rolls back. In the example, Ada is reindexed once however many of her books were tidied. Called outside a transaction, `record_changes` opens one, so all of the records fire together.
+Watchtower reloads the records after the write, one query for each model, so `enabled:`, an `affects:` scope and the callback read the written values. It treats every record passed as changed in the named attributes, so pass only the records the write changed. Each reported change is handled like a save. Watchtower reads `enabled:` as the change is reported, holds the change for the commit, combines it with the transaction's other changes to the same book, and drops it if its transaction or savepoint rolls back. In the example, Ada is reindexed once, even if more than one of her books were tidied. Called outside a transaction, `report_changes` opens one, so all of the records fire together.
 
-A recorded change cannot move a record between watchers, since Watchtower cannot read the keys it had before the write. `record_changes` raises `ArgumentError`, recording nothing, for an attribute that ties a record to its watchers, e.g. `author_id`. Save such a record through its callbacks instead.
+A reported change cannot move a record between watchers, since Watchtower cannot read the keys it had before the write. `report_changes` raises `ArgumentError`, reporting nothing, for an attribute that ties a record to its watchers, e.g. `author_id`. Save such a record through its callbacks instead.
 
 ## Asynchronous processing
 
