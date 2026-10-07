@@ -429,7 +429,7 @@ A reported change cannot move a record between watchers, since Watchtower cannot
 
 ### Callbacks that make changes
 
-When a trigger fires, Watchtower finds every watcher and builds every `WatcherChange` before any of its callbacks run, so the callbacks see the changes as they stood when the trigger fired. A record a callback writes is a change of its own. It is not added to the changes the trigger is running on, and its commit-time triggers run after the callbacks of the trigger that made it, so the watchers hear of the changes in the order they were made.
+When a trigger fires, Watchtower finds every watcher and builds every `WatcherChange` before any of its callbacks run, so the callbacks see the changes as they stood when the trigger fired. The change's `record` is not a copy: inline, it is the instance that was saved, so a write through that instance, e.g. with `update_columns`, shows on it. A record a callback writes is a change of its own. It is not added to the changes the trigger is running on, and its commit-time triggers run after the callbacks of the trigger that made it, so the watchers hear of the changes in the order they were made.
 
 Here the callback takes the change, and Ada's callback for Persuasion's change moves Emma to Grace:
 

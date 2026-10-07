@@ -697,6 +697,15 @@ RSpec.describe "Watchtower triggers on saves, moves and destroys" do
       expect(seen).to eq([ [ "Ada", :changed ], [ "Ada", :changed ] ])
     end
 
+    it "gives an inline callback the instance that was saved as the change's record" do
+      records = []
+      Author.watches(association: :books, callback: ->(_watcher, change) { records << change.record }, inline: true)
+
+      persuasion.update!(title: "Persuasion: A Novel")
+
+      expect(records).to contain_exactly(be(persuasion))
+    end
+
     it "runs an affects: callback on the watchers its scope selected when the callbacks began" do
       seen = []
       callback = lambda do |watcher, change|

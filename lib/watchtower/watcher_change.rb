@@ -9,7 +9,9 @@ module Watchtower
   #     - `:changed`  the record was one of the watcher's associated records before the change and after it
   #     - `nil`       the previous watchers cannot be known (`Watchers#before`)
   # @!attribute record
-  #   @return [ActiveRecord::Base, nil] the associated record; nil when a job runs after it was destroyed or deleted
+  #   @return [ActiveRecord::Base, nil] the associated record: for an inline trigger, the instance last saved or
+  #     destroyed, so it shows anything written through that instance since; for a queued trigger, loaded when the job
+  #     starts, and nil when it was destroyed or deleted by then
   # @!attribute record_class
   #   @return [Class] the associated record's class
   # @!attribute record_id
