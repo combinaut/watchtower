@@ -1,6 +1,14 @@
 module Watchtower
   # Used to run triggers on a change.
   module Dispatch
+    # Runs `pairs` (`run`) now, or, while a run's callbacks are running, once the outermost run has finished. A change
+    # a callback makes is therefore described after the changes the run describes as they stood when it began. The
+    # waiting runs go in the order they were started, so a run a waiting run's callbacks start goes after every run
+    # already waiting.
+    def self.run_after_current(pairs)
+      running? ? deferred_runs << pairs : run(pairs)
+    end
+
     # Runs triggers on the watchers their changes reach, given as `[trigger, change]` pairs: each change a commit
     # fires a trigger on, or the one change a save fires it on. Triggers sharing an observing class, a callback and an
     # `around:` form a group, which runs inside one `around:` when it declares one. A callback that does not want the
@@ -10,8 +18,44 @@ module Watchtower
     #
     # Every group's watchers and `WatcherChange`s are found before any callback runs, so the callbacks see the
     # watchers and changes as they stood when the run began. A write a callback makes is a change of its own, which
-    # fires when its own transaction commits, not as part of this run.
+    # is not part of this run. Its commit-time triggers run after this run (`run_after_current`), and a run started
+    # during this one's callbacks, as a save starts its `at: :save` triggers', runs at once, inside it.
     def self.run(pairs)
+      return run_groups(pairs) if running?
+
+      begin
+        self.deferred_runs = []
+        run_groups(pairs)
+      ensure
+        run_deferred
+      end
+    end
+
+    def self.running?
+      !deferred_runs.nil?
+    end
+
+    # Runs the runs waiting for the current one (`run_after_current`), including those they start, even when a
+    # callback of the current one raised, since their changes have committed. A run that raises stops the rest.
+    def self.run_deferred
+      while (pairs = deferred_runs.shift)
+        run_groups(pairs)
+      end
+    ensure
+      self.deferred_runs = nil
+    end
+
+    # The runs waiting for the current one, in this thread or fiber (Rails' isolation level), or nil when no run is
+    # running.
+    def self.deferred_runs
+      ActiveSupport::IsolatedExecutionState[:watchtower_deferred_runs]
+    end
+
+    def self.deferred_runs=(runs)
+      ActiveSupport::IsolatedExecutionState[:watchtower_deferred_runs] = runs
+    end
+
+    def self.run_groups(pairs)
       groups = pairs.group_by { |trigger, _change| [ trigger.observing_class, trigger.callback, trigger.around ] }.filter_map do |(observing_class, callback, around), group|
         runs = runs(observing_class, callback, group)
         [ callback, around, runs ] if runs.any?

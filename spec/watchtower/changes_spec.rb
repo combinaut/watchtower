@@ -497,11 +497,99 @@ RSpec.describe "Watchtower triggers on saves, moves and destroys" do
       expect(log).to eq(nested)
     end
 
-    it "runs an inline, at: :commit trigger on that save inside the callback that made it" do
+    it "runs an inline, at: :commit trigger on that save after the callbacks of the run that made it" do
       Author.watches(association: :books, callback: retitling_emma, inline: true)
       persuasion.update!(title: "Persuasion: A Novel")
 
-      expect(log).to eq(nested)
+      expect(log).to eq(in_turn)
+    end
+
+    it "runs an inline, at: :commit trigger on that save after the run's other groups" do
+      Author.watches(association: :books, callback: retitling_emma, inline: true)
+      Author.watches(association: :books, callback: ->(_watcher, change) { log << [ :other, change.record_id ] }, inline: true)
+      persuasion.update!(title: "Persuasion: A Novel")
+
+      expect(log).to eq([ *in_turn.first(2), [ :other, persuasion.id ], *in_turn.last(2), [ :other, emma.id ] ])
+    end
+
+    it "runs an inline, at: :save trigger on that save inside a commit-time callback that made it" do
+      Author.watches(association: :books, callback: retitling_emma, inline: true)
+      Author.watches(association: :books, callback: ->(_watcher, change) { log << [ :at_save, change.record_id ] }, inline: true, at: :save)
+      persuasion.update!(title: "Persuasion: A Novel")
+
+      expect(log).to eq([ [ :at_save, persuasion.id ], [ :start, persuasion.id ], [ :at_save, emma.id ], [ :finish, persuasion.id ], *in_turn.last(2) ])
+    end
+
+    it "runs an inline, at: :commit trigger on a queued callback's save after the job's callbacks" do
+      Author.watches(association: :books, callback: retitling_emma)
+      Author.watches(association: :books, callback: ->(_watcher, change) { log << [ :inline, change.record_id ] }, inline: true)
+      persuasion.update!(title: "Persuasion: A Novel")
+
+      perform_enqueued_jobs
+
+      expect(log).to eq([ [ :inline, persuasion.id ], *in_turn.first(2), [ :inline, emma.id ] ])
+    end
+
+    it "runs the changes callbacks make level by level, each after the changes made before it" do
+      middlemarch = Book.create!(author: author, title: "Middlemarch")
+      daniel_deronda = Book.create!(author: author, title: "Daniel Deronda")
+      saves = { persuasion.id => [ emma, middlemarch ], emma.id => [ daniel_deronda ] }
+      Author.watches(association: :books, callback: lambda { |_watcher, change|
+        log << change.record_id
+        saves.fetch(change.record_id, []).each { |book| book.update!(title: "#{book.title}: A Novel") }
+      }, inline: true)
+      persuasion.update!(title: "Persuasion: A Novel")
+
+      expect(log).to eq([ persuasion.id, emma.id, middlemarch.id, daniel_deronda.id ])
+    end
+
+    it "runs the triggers on a callback's save when that callback then raises, and raises its error" do
+      Author.watches(association: :books, callback: lambda { |_watcher, change|
+        log << change.record_id
+        emma.update!(title: "Emma: A Novel") if change.record_id == persuasion.id
+        raise "callback failed" if change.record_id == persuasion.id
+      }, inline: true)
+
+      expect { persuasion.update!(title: "Persuasion: A Novel") }.to raise_error("callback failed")
+      expect(log).to eq([ persuasion.id, emma.id ])
+    end
+
+    it "runs a save's inline triggers before the save returns after a callback's save raised in its triggers" do
+      Author.watches(association: :books, callback: lambda { |_watcher, change|
+        log << change.record_id
+        emma.update!(title: "Emma: A Novel") if change.record_id == persuasion.id
+        raise "callback failed" if change.record_id == emma.id
+      }, inline: true)
+      expect { persuasion.update!(title: "Persuasion: A Novel") }.to raise_error("callback failed")
+
+      middlemarch = Book.create!(author: author, title: "Middlemarch")
+
+      expect(log).to eq([ persuasion.id, emma.id, middlemarch.id ])
+    end
+
+    # Persuasion and Emma are retitled together, and the callback for Persuasion's change moves Emma to Grace through
+    # her callbacks.
+    {
+      "inline" => { inline: true },
+      "inline, with an around: that opens a transaction" => { inline: true, around: ->(&callbacks) { Book.transaction { callbacks.call } } },
+      "queued" => {}
+    }.each do |mode, options|
+      it "describes a callback's move after the changes of the run that made it, #{mode}" do
+        seen = []
+        Author.watches(association: :books, callback: lambda { |watcher, change|
+          seen << [ watcher.name, change.record_id, change.kind ]
+          Book.find(emma.id).update!(author: other_author) if change.record_id == persuasion.id
+        }, **options)
+
+        Book.transaction do
+          persuasion.update!(title: "Persuasion: A Novel")
+          emma.update!(title: "Emma: A Novel")
+        end
+        perform_enqueued_jobs
+        perform_enqueued_jobs
+
+        expect(seen).to eq([ [ "Ada", persuasion.id, :changed ], [ "Ada", emma.id, :changed ], [ "Ada", emma.id, :removed ], [ "Grace", emma.id, :added ] ])
+      end
     end
 
     it "runs an inline trigger on that save after the group's callbacks when around: opens a transaction" do

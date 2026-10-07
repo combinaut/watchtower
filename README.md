@@ -429,7 +429,7 @@ A reported change cannot move a record between watchers, since Watchtower cannot
 
 ### Callbacks that make changes
 
-When a trigger fires, Watchtower finds every watcher and builds every `WatcherChange` before any of its callbacks run, so the callbacks see the changes as they stood when the trigger fired. A record a callback writes is a change of its own. It is not added to the changes the trigger is running on, and it fires its own triggers when its own transaction commits.
+When a trigger fires, Watchtower finds every watcher and builds every `WatcherChange` before any of its callbacks run, so the callbacks see the changes as they stood when the trigger fired. A record a callback writes is a change of its own. It is not added to the changes the trigger is running on, and its commit-time triggers run after the callbacks of the trigger that made it, so the watchers hear of the changes in the order they were made.
 
 Here the callback takes the change, and Ada's callback for Persuasion's change moves Emma to Grace:
 
@@ -440,19 +440,22 @@ Book.transaction do
 end
 ```
 
-- **Moved through its callbacks**, e.g. `emma.update!(author: grace)`, the move is a change of its own, so Ada is told Emma was `:removed` and Grace that it was `:added`. Emma's retitle is still described as it stood when the trigger fired, so Ada is also told Emma `:changed`. Inline, she can hear of the move first (see the table below).
+- **Moved through its callbacks**, e.g. `emma.update!(author: grace)`, the move is a change of its own, so Ada is told Emma was `:removed` and Grace that it was `:added`. Emma's retitle is still described as it stood when the trigger fired, so Ada is also told Emma `:changed`, before she is told of the move.
 - **Moved without callbacks**, e.g. with `update_all`, Grace is never told, as with any write Watchtower does not see. `report_changes` cannot report a move (see [Changes made without callbacks](#changes-made-without-callbacks)), so move a record through its callbacks.
 
 When the change a callback makes fires depends on how its trigger runs:
 
 | The trigger that saves the record | Its save fires the triggers watching it | So they run |
 | --- | --- | --- |
-| `inline: true, at: :save` | during the save | inside the callback that made it |
-| `inline: true` | when the save's own transaction commits, as soon as it is saved, since the transaction that fired the trigger has already committed | inside the callback that made it |
-| `inline: true`, with an `around:` that opens a transaction, as in [Wrapping the callbacks](#wrapping-the-callbacks) | when the `around:` transaction commits | after the trigger's other callbacks |
+| `inline: true, at: :save` | during the save | inside the callback that made it, before the save returns |
+| `inline: true` | when the save's own transaction commits, or an `around:` transaction around it, as in [Wrapping the callbacks](#wrapping-the-callbacks) | after every callback of the trigger that made it, and after the changes made before it, before the save or commit that started the chain returns |
 | Queued, either `at:` | in a job of its own, enqueued when the save's transaction commits | after the job that made it |
 
-A callback whose writes fire the trigger that ran it, directly or through other triggers, loops. Inline, the loop ends in a `SystemStackError`. Queued, each job enqueues the next, and nothing stops it. Watchtower does not detect loops, so check that a callback's writes cannot lead back to it.
+So when a callback's save returns, the inline commit-time triggers it fires have not run yet.
+
+An `at: :save` trigger runs inside the save that fires it, so its callbacks can run in the middle of another trigger's. When one save fires several callbacks and one of them moves the record through its callbacks, a callback that runs later on that save is told of the move first, and then of the save as it stood before the move.
+
+A callback whose writes fire the trigger that ran it, directly or through other triggers, loops. Inline at `at: :save`, the loop recurses until it ends in a `SystemStackError`. Inline at `at: :commit`, each round runs after the last, and the change that started it never returns. Queued, each job enqueues the next, and nothing stops it. Watchtower does not detect loops, so check that a callback's writes cannot lead back to it.
 
 ## Asynchronous processing
 

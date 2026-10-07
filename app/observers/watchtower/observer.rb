@@ -312,9 +312,10 @@ module Watchtower
     end
 
     # Fires a commit's `rows`, each `[change, at: :commit triggers, enabled declarations]`, in this thread: the
-    # enabled inline triggers run here, on every row together, and the enabled queued ones in one `Watchtower::Job`.
+    # enabled inline triggers run here, on every row together, after any run whose callback made the commit
+    # (`Dispatch.run_after_current`), and the enabled queued ones in one `Watchtower::Job`.
     def fire_at_commit(rows)
-      Dispatch.run(rows.flat_map { |change, triggers, enabled| triggers.select { |trigger| trigger.inline && enabled.include?(trigger.declaration) }.map { |trigger| [ trigger, change ] } })
+      Dispatch.run_after_current(rows.flat_map { |change, triggers, enabled| triggers.select { |trigger| trigger.inline && enabled.include?(trigger.declaration) }.map { |trigger| [ trigger, change ] } })
       enqueue(:commit, rows.map { |change, triggers, enabled| [ change, triggers.reject(&:inline), enabled ] })
     end
 
