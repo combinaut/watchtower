@@ -85,9 +85,9 @@ module Watchtower
     # A Trigger's `declaration` is an object unique to the `watches` call that declared it, which tells two triggers
     # apart within the process even when their keys match.
     Trigger = Struct.new(:observing_class, :callback, :association, :attributes, :class, :affects, :includes, :enabled, :inline, :around, :at, :watches, :declaration, keyword_init: true) do
-      # Whether the trigger fires at `point`, one of `FIRING_POINTS`.
+      # Whether the trigger fires at `point`, one of `FIRING_POINTS` as a symbol or a string.
       def fires_at?(point)
-        at == point
+        at == point.to_sym
       end
 
       # `at_commit?` and `at_save?`: whether the trigger fires at that point.
@@ -192,20 +192,56 @@ module Watchtower
       observe_change(changed_record, destroyed: true)
     end
 
+    # Reports that `attributes` of `records` changed without Active Record callbacks, e.g. by `update_all`, so their
+    # watchers' triggers fire as they would for a save of those attributes (see `Watchtower.report_changes`). Returns
+    # nil. Raises `ArgumentError`, before reporting anything, for an attribute that ties a record to its watchers, since
+    # the watchers it was moved from are unknown. The records on each connection are reported inside a transaction on
+    # it, which joins one already open, so outside a transaction each connection's records fire together when it
+    # commits.
+    def report_changes(records, attributes:)
+      attributes = Array(attributes).map(&:to_s)
+      watched = reload_written(records).filter_map do |record|
+        triggers = triggers_for(record.class)
+        next if triggers.empty?
+
+        moving = triggers.flat_map { |trigger| trigger.watches_on(record.class) }.flat_map(&:foreign_key_attributes) & attributes
+        raise ArgumentError, "cannot report a change to #{moving.join(', ')} on #{record.class.name}: it moves the record between watchers" if moving.any?
+
+        [ record, triggers ]
+      end
+      watched.group_by { |record, _triggers| record.class.connection }.each_value do |group|
+        group.first.first.class.transaction do
+          group.each { |record, triggers| observe(record, Change.reported(record, attributes), triggers) }
+        end
+      end
+      nil
+    end
+
     private
 
-    # Holds the change for the `at: :commit` triggers until the transaction it was made in commits (`hold_for_commit`),
-    # and fires the `at: :save` triggers on it now (`fire_at_save`). Every trigger's `enabled` predicate is read during
-    # the save, in the thread that made the change, while any caller-set context, such as a thread-local set around a
-    # block of writes, is still live. A block around the save therefore gates its triggers even when the transaction
-    # commits after the block. The commit-time predicates are read before any save-time trigger runs. The change is
-    # captured before anything fires, so nothing a save-time trigger does to the record alters what the commit-time
-    # ones fire on.
+    # `records` as the database holds them after the write, so a predicate, an `affects:` scope and the change's record
+    # read the written values. One query for each base class, and a record no longer in the database is left out.
+    def reload_written(records)
+      records.group_by { |record| record.class.base_class }.flat_map do |base_class, group|
+        base_class.unscoped.where(base_class.primary_key => group.map(&:id)).to_a
+      end
+    end
+
+    # Observes the change `changed_record`'s save or destroy made (`observe`). The change is captured before anything
+    # fires, so nothing a save-time trigger does to the record alters what the commit-time ones fire on.
     def observe_change(changed_record, destroyed:)
       triggers = triggers_for(changed_record.class)
       return if triggers.empty?
 
-      change = Change.capture(changed_record, triggers, destroyed: destroyed, resolve_affects: destroyed)
+      observe(changed_record, Change.capture(changed_record, triggers, destroyed: destroyed, resolve_affects: destroyed), triggers)
+    end
+
+    # Holds `change` for the `at: :commit` triggers until the transaction it was made in commits (`hold_for_commit`),
+    # and fires the `at: :save` triggers on it now (`fire_at_save`). Every trigger's `enabled` predicate is read now,
+    # in the thread that made the change, while any caller-set context, such as a thread-local set around a block of
+    # writes, is still live. A block around the save therefore gates its triggers even when the transaction commits
+    # after the block. The commit-time predicates are read before any save-time trigger runs.
+    def observe(changed_record, change, triggers)
       at_commit, at_save = triggers.partition(&:at_commit?)
       if at_commit.any?
         enabled = []
@@ -221,8 +257,8 @@ module Watchtower
     # queued trigger's predicate is read after the inline callbacks have run.
     def fire_at_save(triggers, changed_record, change)
       inline, queued = triggers.partition(&:inline)
-      Dispatch.run(enabled_triggers(inline, changed_record), change)
-      enqueue(queued, :save, change, enabled_triggers(queued, changed_record).map(&:declaration))
+      Dispatch.run(enabled_triggers(inline, changed_record).map { |trigger| [ trigger, change ] })
+      enqueue(:save, [ [ change, queued, enabled_triggers(queued, changed_record).map(&:declaration) ] ])
     end
 
     def enabled_triggers(triggers, changed_record)
@@ -249,9 +285,10 @@ module Watchtower
       transaction.after_commit { flush(connection) }
     end
 
-    # Fires the `at: :commit` triggers once for each row the held changes touch, on that row's changes merged into
-    # one: every attribute they changed, and the watchers the row had before the earliest of them (`Change#merge`). A
-    # trigger fires when any of the row's held changes enabled it. The held changes are taken before anything fires,
+    # Fires the `at: :commit` triggers on the rows the held changes touch, each row's changes merged into one: every
+    # attribute they changed, and the watchers the row had before the earliest of them (`Change#merge`). A trigger
+    # fires on a row when any of the row's held changes enabled it, and all of the rows fire together
+    # (`fire_at_commit`). The held changes are taken before anything fires,
     # so a change a callback makes is held for its own transaction's commit. Every save in a transaction registers a
     # flush, and the first to run takes every held change, so the rest find none.
     def flush(connection)
@@ -259,12 +296,12 @@ module Watchtower
       return if held.empty?
 
       connection.instance_variable_set(:@watchtower_held_changes, {})
-      held.each_value do |entries|
-        next if entries.empty?
-
-        triggers = triggers_for(entries.last.first.record_type.constantize).select(&:at_commit?)
-        fire_at_commit(triggers, entries.map(&:first).reduce(:merge), entries.flat_map(&:last).uniq)
+      rows = held.values.reject(&:empty?).map do |entries|
+        # The row's class as last saved, which `becomes!` may have changed since an earlier save.
+        last_class = entries.last.first.record_type.constantize
+        [ entries.map(&:first).reduce(:merge), triggers_for(last_class).select(&:at_commit?), entries.flat_map(&:last).uniq ]
       end
+      fire_at_commit(rows)
     end
 
     # The changes awaiting a commit on `connection`, in the order they were saved:
@@ -274,24 +311,39 @@ module Watchtower
       connection.instance_variable_get(:@watchtower_held_changes) || connection.instance_variable_set(:@watchtower_held_changes, {})
     end
 
-    # Fires `change` for `triggers`, the `at: :commit` ones, in this thread. Those whose declarations are among
-    # `enabled` run inline here, or, when queued, in one `Watchtower::Job`.
-    def fire_at_commit(triggers, change, enabled)
-      inline, queued = triggers.partition(&:inline)
-      Dispatch.run(inline.select { |trigger| enabled.include?(trigger.declaration) }, change)
-      enqueue(queued, :commit, change, enabled)
+    # Fires a commit's `rows`, each `[change, at: :commit triggers, enabled declarations]`, in this thread: the
+    # enabled inline triggers run here, on every row together, after any run whose callback made the commit
+    # (`Dispatch.run_after_current`), and the enabled queued ones in one `Watchtower::Job`. The changes have
+    # committed, so the job is enqueued even when an inline callback raises, and the callback's error is raised
+    # after it. An error enqueueing the job then is logged.
+    def fire_at_commit(rows)
+      queued = rows.map { |change, triggers, enabled| [ change, triggers.reject(&:inline), enabled ] }
+      begin
+        Dispatch.run_after_current(rows.flat_map { |change, triggers, enabled| triggers.select { |trigger| trigger.inline && enabled.include?(trigger.declaration) }.map { |trigger| [ trigger, change ] } })
+      rescue StandardError => error
+        begin
+          enqueue(:commit, queued)
+        rescue StandardError => enqueue_error
+          Rails.logger.error { "Watchtower could not enqueue a job after a callback failed: #{enqueue_error.class}: #{enqueue_error.message}" }
+        end
+        raise error
+      end
+      enqueue(:commit, queued)
     end
 
-    # Queues `change` for the `queued` triggers whose declarations are among `enabled`. The job runs the queued triggers
-    # that fire `at` and that the change reaches, except those whose keys it carries as suppressed, which are the ones
-    # not enabled. Enqueues nothing when none of them is enabled.
-    def enqueue(queued, at, change, enabled)
-      suppressed = queued.reject { |trigger| enabled.include?(trigger.declaration) }
-      return if suppressed.length == queued.length
+    # Queues one `Watchtower::Job` for the `rows`, each `[change, queued triggers, enabled declarations]`, that fire
+    # `at`. Each change carries the keys of its queued triggers that were not enabled as suppressed, and the job runs the
+    # rest. A row whose queued triggers were all disabled is left out, and nothing is enqueued when every row is.
+    def enqueue(at, rows)
+      changes = rows.filter_map do |change, queued, enabled|
+        suppressed = queued.reject { |trigger| enabled.include?(trigger.declaration) }
+        next if suppressed.length == queued.length
 
-      payload = change.to_payload.merge(at: at)
-      payload[:suppressed_trigger_keys] = suppressed.map(&:key) if suppressed.any?
-      Watchtower::Job.perform_later(**payload)
+        payload = change.to_payload
+        payload[:suppressed_trigger_keys] = suppressed.map(&:key) if suppressed.any?
+        payload
+      end
+      Watchtower::Job.perform_later(at: at, changes: changes) if changes.any?
     end
 
     def triggers_for(klass)

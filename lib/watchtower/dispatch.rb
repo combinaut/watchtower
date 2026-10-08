@@ -1,18 +1,88 @@
 module Watchtower
   # Used to run triggers on a change.
   module Dispatch
-    # Runs each of `triggers` that `change` is relevant to on each of its watchers. Triggers sharing an
-    # observing class, a callback and an `around:` run the callback once per record, all of it inside that
-    # `around:` when they declare one. A callback that wants the change (`Helpers.callback_wants_change?`) is also
-    # given the `Watchtower::WatcherChange` for each record, which is built only then (`watcher_changes`).
-    def self.run(triggers, change)
-      triggers.group_by { |trigger| [ trigger.observing_class, trigger.callback, trigger.around ] }.each do |(observing_class, callback, around), group|
-        watchers = watchers(observing_class, group, change)
-        next unless watchers
+    # Runs `pairs` (`run`) now, or, while a run's callbacks are running, once the outermost run has finished. A change
+    # a callback makes is therefore described after the changes the run describes as they stood when it began. The
+    # waiting runs go in the order they were started, so a run a waiting run's callbacks start goes after every run
+    # already waiting.
+    def self.run_after_current(pairs)
+      running? ? deferred_runs << pairs : run(pairs)
+    end
 
-        watcher_changes = watcher_changes(observing_class, group, change) if Helpers.callback_wants_change?(callback, observing_class)
-        run_callbacks = -> { run_callback(callback, watchers, watcher_changes) }
+    # Runs triggers on the watchers their changes reach, given as `[trigger, change]` pairs: each change a commit
+    # fires a trigger on, or the one change a save fires it on. Triggers sharing an observing class, a callback and an
+    # `around:` form a group, which runs inside one `around:` when it declares one. A callback that does not want the
+    # change runs once per watcher however many of the group's changes reach it, and the group's watchers are found
+    # together (`watchers`). A callback that wants the change (`Helpers.callback_wants_change?`) runs once per watcher
+    # for each change that reaches it, given the `Watchtower::WatcherChange` for that change (`watcher_changes`).
+    #
+    # Every group's watchers and `WatcherChange`s are found before any callback runs, so the callbacks see the
+    # watchers and changes as they stood when the run began. A write a callback makes is a change of its own, which
+    # is not part of this run. Its commit-time triggers run after this run (`run_after_current`), and a run started
+    # during this one's callbacks, as a save starts its `at: :save` triggers', runs at once, inside it.
+    def self.run(pairs)
+      running? ? run_groups(pairs) : run_outermost(pairs)
+    end
+
+    def self.running?
+      !deferred_runs.nil?
+    end
+
+    # Runs `pairs`, then the runs waiting for it (`run_after_current`), including those they start. Each run's changes
+    # have committed, so every one runs even when one before it raised, and the first error is raised once they all
+    # have. A later error is logged.
+    def self.run_outermost(pairs)
+      self.deferred_runs = [ pairs ]
+      first_error = nil
+      while (next_pairs = deferred_runs.shift)
+        begin
+          run_groups(next_pairs)
+        rescue StandardError => error
+          if first_error
+            Rails.logger.error { "Watchtower callback failed after an earlier one: #{error.class}: #{error.message}" }
+          else
+            first_error = error
+          end
+        end
+      end
+      raise first_error if first_error
+    ensure
+      self.deferred_runs = nil
+    end
+
+    # The runs waiting for the current one, in this thread or fiber (Rails' isolation level), or nil when no run is
+    # running.
+    def self.deferred_runs
+      ActiveSupport::IsolatedExecutionState[:watchtower_deferred_runs]
+    end
+
+    def self.deferred_runs=(runs)
+      ActiveSupport::IsolatedExecutionState[:watchtower_deferred_runs] = runs
+    end
+
+    def self.run_groups(pairs)
+      groups = pairs.group_by { |trigger, _change| [ trigger.observing_class, trigger.callback, trigger.around ] }.filter_map do |(observing_class, callback, around), group|
+        runs = runs(observing_class, callback, group)
+        [ callback, around, runs ] if runs.any?
+      end
+      groups.each do |callback, around, runs|
+        run_callbacks = -> { runs.each { |watchers, watcher_changes| run_callback(callback, watchers, watcher_changes) } }
         around ? around.call(&run_callbacks) : run_callbacks.call
+      end
+    end
+
+    # The `[watchers, watcher_changes]` the group's callback runs over: one for each change when the callback wants
+    # the change, and otherwise one for the whole group with no `watcher_changes`. A run that reaches no watcher is
+    # left out.
+    def self.runs(observing_class, callback, group)
+      if Helpers.callback_wants_change?(callback, observing_class)
+        group.group_by(&:last).filter_map do |change, change_pairs|
+          watchers = watchers(observing_class, change_pairs)
+          watchers && [ watchers, watcher_changes(observing_class, change_pairs.map(&:first), change) ]
+        end
+      else
+        watchers = watchers(observing_class, group)
+        watchers ? [ [ watchers, nil ] ] : []
       end
     end
 
@@ -63,25 +133,51 @@ module Watchtower
       after ? :added : :removed
     end
 
-    def self.watchers(observing_class, triggers, change)
+    # The watchers the `[trigger, change]` pairs reach, as a relation over their ids as they are now, or nil when none
+    # is reached. Each watch of each trigger looks its watchers up once for all of the changes it is relevant to
+    # (`Watchers#scopes`).
+    def self.watchers(observing_class, pairs)
       primary_key = observing_class.arel_table[observing_class.primary_key]
-      scopes = triggers.flat_map do |trigger|
-        change.watches_of(trigger).select { |watch| relevant?(watch, change) }.flat_map { |watch| Watchers.new(trigger, watch).scopes(change) }
+      scopes = pairs.group_by(&:first).flat_map do |trigger, trigger_pairs|
+        changes = trigger_pairs.map(&:last)
+        trigger.watches.flat_map do |watch|
+          reaching = changes.select { |change| change.watches_of(trigger).include?(watch) && relevant?(watch, change) }
+          reaching.empty? ? [] : Watchers.new(trigger, watch).scopes(reaching)
+        end
       end
       return nil if scopes.empty?
 
-      watchers = scopes.map { |scope| observing_class.where(observing_class.primary_key => scope.select(primary_key)) }.reduce(:or)
-      includes = triggers.filter_map(&:includes)
+      ids = scopes.map { |scope| observing_class.where(observing_class.primary_key => scope.select(primary_key)) }.reduce(:or).pluck(observing_class.primary_key)
+      return nil if ids.empty?
+
+      watchers = observing_class.where(observing_class.primary_key => ids)
+      includes = pairs.map(&:first).uniq.filter_map(&:includes)
       includes.any? ? watchers.includes(*includes) : watchers
     end
 
     # Whether `change` fires `watch`: a destroy, a move, or a change to a watched attribute always does, and any
-    # other change does when the watch names no attributes and is not `foreign_keys_only`.
+    # other change does when the watch names no attributes and is not `foreign_keys_only`. A change can never fire a
+    # watch whose polymorphic association it does not belong to (`reachable?`).
     def self.relevant?(watch, change)
+      return false unless reachable?(watch, change)
+
       watched = watch.foreign_key_attributes + watch.attributes.map(&:to_s)
       return true if change.destroyed || change.changed_attributes.intersect?(watched)
 
       !watch.foreign_keys_only && watch.attributes.empty?
+    end
+
+    # Whether the changed record can belong to the watch's association. Through a polymorphic `has_many ... as:`,
+    # e.g. `has_many :comments, as: :commentable`, a record belongs to a watcher only when its type as saved names the
+    # watcher's model, or did before a move or destroy, so a comment on a `Book` never reaches an `Author`. Any
+    # other watch, or a change whose type is unknown, is reachable.
+    def self.reachable?(watch, change)
+      reflection = watch.reflection
+      return true unless reflection && !reflection.through_reflection? && reflection.type
+
+      type = reflection.type.to_s
+      types = [ change.record&.attribute_in_database(type), change.previous_foreign_keys[type] ].compact
+      types.empty? || types.include?(reflection.active_record.polymorphic_name)
     end
   end
 end

@@ -38,6 +38,21 @@ module Watchtower
       )
     end
 
+    # The change to `attributes` of `record` written without callbacks (`Observer#report_changes`). It moves the
+    # record nowhere, so it carries no previous foreign keys.
+    def self.reported(record, attributes)
+      new(
+        record_class: record.class.base_class.name,
+        record_type: record.class.name,
+        record_id: record.id,
+        record: record,
+        destroyed: false,
+        changed_attributes: attributes,
+        previous_foreign_keys: {},
+        previous_watcher_ids: {}
+      )
+    end
+
     def self.affects_ids(record, triggers)
       triggers.select(&:affects).to_h do |trigger|
         [ trigger.key, Helpers.evaluate(trigger.affects, record).pluck(trigger.observing_class.primary_key) ]

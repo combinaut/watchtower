@@ -1,4 +1,14 @@
 RSpec.describe Watchtower::Observer do
+  # The payloads of the enqueued `Watchtower::Job`s.
+  def watchtower_jobs
+    enqueued_jobs.select { |job| job["job_class"] == "Watchtower::Job" }.map { |job| ActiveJob::Arguments.deserialize(job["arguments"]).first }
+  end
+
+  # The change payloads the enqueued `Watchtower::Job`s carry.
+  def enqueued_changes
+    watchtower_jobs.flat_map { |job| job[:changes] }
+  end
+
   describe ".build_trigger" do
     it "raises without an observing class" do
       expect { described_class.build_trigger(callback: :reindex!) }
@@ -40,6 +50,11 @@ RSpec.describe Watchtower::Observer do
       at_save = described_class.build_trigger(observing_class: Author, association: :books, callback: :reindex!, at: :save, inline: true)
 
       expect([ at_commit.at_commit?, at_commit.at_save?, at_save.at_commit?, at_save.at_save? ]).to eq([ true, false, false, true ])
+    end
+
+    it "answers whether it fires at a point given as a string" do
+      trigger = described_class.build_trigger(observing_class: Author, association: :books, callback: :reindex!)
+      expect([ trigger.fires_at?("commit"), trigger.fires_at?("save") ]).to eq([ true, false ])
     end
 
     it "raises for an at: other than :commit or :save" do
@@ -129,9 +144,9 @@ RSpec.describe Watchtower::Observer do
       Author.watches(association: :books, callback: :reindex!)
       clear_enqueued_jobs
 
-      expect { book.update!(title: "Changed") }
-        .to have_enqueued_job(Watchtower::Job)
-        .with(hash_including(record_class: "Book", record_id: book.id, destroyed: false))
+      book.update!(title: "Changed")
+
+      expect(enqueued_changes).to contain_exactly(hash_including(record_class: "Book", record_id: book.id, destroyed: false))
     end
 
     context "with an enabled predicate" do
@@ -154,9 +169,9 @@ RSpec.describe Watchtower::Observer do
         Author.watches(association: :books, callback: :touch, enabled: -> { true })
         clear_enqueued_jobs
 
-        expect { book.update!(title: "Changed") }
-          .to have_enqueued_job(Watchtower::Job)
-          .with(hash_including(suppressed_trigger_keys: [ a_string_starting_with("Author/reindex!/books/enabled:") ]))
+        book.update!(title: "Changed")
+
+        expect(enqueued_changes).to contain_exactly(hash_including(suppressed_trigger_keys: [ a_string_starting_with("Author/reindex!/books/enabled:") ]))
       end
 
       it "enqueues nothing when the only save that enabled it rolled back in a savepoint" do
@@ -219,9 +234,8 @@ RSpec.describe Watchtower::Observer do
         expect(enqueued_jobs).to be_empty, "nothing is enqueued before the commit"
       end
 
-      payloads = enqueued_jobs.select { |job| job["job_class"] == "Watchtower::Job" }.map { |job| ActiveJob::Arguments.deserialize(job["arguments"]).first }
-      expect(payloads.size).to eq(1)
-      expect(payloads.first).to include(changed_attributes: a_collection_including("title", "author_id"), previous_foreign_keys: { "author_id" => author.id })
+      expect(watchtower_jobs.size).to eq(1)
+      expect(enqueued_changes).to contain_exactly(include(changed_attributes: a_collection_including("title", "author_id"), previous_foreign_keys: { "author_id" => author.id }))
     end
 
     it "holds nothing for a row whose only change rolls back" do
@@ -246,8 +260,8 @@ RSpec.describe Watchtower::Observer do
         book.update!(author: third)
       end
 
-      expect(enqueued_jobs.select { |job| job["job_class"] == "Watchtower::Job" }.size).to eq(1)
-      expect(Watchtower::Job).to have_been_enqueued.with(hash_including(previous_foreign_keys: { "author_id" => author.id }))
+      expect(watchtower_jobs.size).to eq(1)
+      expect(enqueued_changes).to contain_exactly(hash_including(previous_foreign_keys: { "author_id" => author.id }))
     end
 
     it "reads a predicate against the instance the row was last saved through" do
@@ -276,8 +290,8 @@ RSpec.describe Watchtower::Observer do
         Book.current_transaction.after_commit { book.update!(author: third) }
       end
 
-      expect(Watchtower::Job).to have_been_enqueued.with(hash_including(previous_foreign_keys: { "author_id" => author.id }))
-      expect(Watchtower::Job).to have_been_enqueued.with(hash_including(previous_foreign_keys: { "author_id" => other.id }))
+      expect(watchtower_jobs.size).to eq(2)
+      expect(enqueued_changes).to contain_exactly(hash_including(previous_foreign_keys: { "author_id" => author.id }), hash_including(previous_foreign_keys: { "author_id" => other.id }))
     end
   end
 
@@ -335,7 +349,7 @@ RSpec.describe Watchtower::Observer do
 
       book.update!(author: other)
 
-      expect(Watchtower::Job).to have_been_enqueued.with(hash_including(previous_foreign_keys: { "author_id" => author.id }))
+      expect(enqueued_changes).to include(hash_including(previous_foreign_keys: { "author_id" => author.id }))
     end
 
     it "enqueues a job apart from a trigger that fires at the commit, each naming the point it fires at" do
@@ -345,10 +359,9 @@ RSpec.describe Watchtower::Observer do
 
       book.update!(title: "Changed")
 
-      jobs = enqueued_jobs.select { |job| job["job_class"] == "Watchtower::Job" }.map { |job| ActiveJob::Arguments.deserialize(job["arguments"]).first }
       aggregate_failures do
-        expect(jobs.pluck(:at)).to contain_exactly(:save, :commit)
-        expect(jobs.pluck(:suppressed_trigger_keys).compact).to be_empty, "no trigger is disabled"
+        expect(watchtower_jobs.pluck(:at)).to contain_exactly(:save, :commit)
+        expect(enqueued_changes.pluck(:suppressed_trigger_keys).compact).to be_empty, "no trigger is disabled"
       end
     end
   end

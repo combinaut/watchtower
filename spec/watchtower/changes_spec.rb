@@ -108,6 +108,16 @@ RSpec.describe "Watchtower triggers on saves, moves and destroys" do
         expect { comment.update!(commentable: book) }.to reindex(author)
       end
 
+      it "does not look for watchers of a comment on another type" do
+        comment = Comment.create!(commentable: book, body: "Hi")
+        authors_read = 0
+        counter = ->(*, payload) { authors_read += 1 if payload[:sql].start_with?("SELECT") && payload[:sql].include?('"authors"') }
+
+        ActiveSupport::Notifications.subscribed(counter, "sql.active_record") { comment.update!(body: "Edited") }
+
+        expect(authors_read).to eq(0)
+      end
+
       it "does not run on a watcher of another type that shares the key" do
         comment = Comment.create!(commentable: Book.create!(author: other_author, title: "Same id"), body: "Hi")
         Author.where(id: comment.commentable_id).first_or_create!(name: "Shares the id")
@@ -429,6 +439,344 @@ RSpec.describe "Watchtower triggers on saves, moves and destroys" do
       end.to reindex(author)
     ensure
       enabled = true
+    end
+  end
+
+  it "runs a subclass's trigger when a row is saved as that subclass later in the transaction" do
+    Author.watches(association: :books, callback: :touch, inline: true)
+    Author.watches(association: :novels, callback: :reindex!, inline: true)
+    book
+
+    expect do
+      Book.transaction do
+        book.update!(title: "Draft")
+        book.becomes!(Novel).save!
+      end
+    end.to reindex(author)
+  end
+
+  it "reads a polymorphic type as saved, not as an instance holds it unsaved" do
+    Author.watches(association: :comments, callback: :reindex!, inline: true)
+    comment = Comment.create!(commentable: author, body: "Hi")
+
+    expect do
+      Comment.transaction do
+        comment.update!(body: "Edited")
+        comment.commentable = book
+      end
+    end.to reindex(author)
+  end
+
+  context "with a callback that saves a record another trigger watches" do
+    let!(:persuasion) { Book.create!(author: author, title: "Persuasion") }
+    let!(:emma) { Book.create!(author: author, title: "Emma") }
+    let(:log) { [] }
+
+    # A callback that logs when it starts and finishes on each change, and retitles Emma, through its callbacks, while
+    # running on Persuasion's change.
+    def retitling_emma
+      lambda do |_watcher, change|
+        log << [ :start, change.record_id ]
+        emma.update!(title: "Emma: A Novel") if change.record_id == persuasion.id
+        log << [ :finish, change.record_id ]
+      end
+    end
+
+    def nested
+      [ [ :start, persuasion.id ], [ :start, emma.id ], [ :finish, emma.id ], [ :finish, persuasion.id ] ]
+    end
+
+    def in_turn
+      [ [ :start, persuasion.id ], [ :finish, persuasion.id ], [ :start, emma.id ], [ :finish, emma.id ] ]
+    end
+
+    it "runs an inline, at: :save trigger on that save inside the callback that made it" do
+      Author.watches(association: :books, callback: retitling_emma, inline: true, at: :save)
+      persuasion.update!(title: "Persuasion: A Novel")
+
+      expect(log).to eq(nested)
+    end
+
+    it "runs an inline, at: :commit trigger on that save after the callbacks of the run that made it" do
+      Author.watches(association: :books, callback: retitling_emma, inline: true)
+      persuasion.update!(title: "Persuasion: A Novel")
+
+      expect(log).to eq(in_turn)
+    end
+
+    it "runs an inline, at: :commit trigger on that save after the run's other groups" do
+      Author.watches(association: :books, callback: retitling_emma, inline: true)
+      Author.watches(association: :books, callback: ->(_watcher, change) { log << [ :other, change.record_id ] }, inline: true)
+      persuasion.update!(title: "Persuasion: A Novel")
+
+      expect(log).to eq([ *in_turn.first(2), [ :other, persuasion.id ], *in_turn.last(2), [ :other, emma.id ] ])
+    end
+
+    it "runs an inline, at: :save trigger on that save inside a commit-time callback that made it" do
+      Author.watches(association: :books, callback: retitling_emma, inline: true)
+      Author.watches(association: :books, callback: ->(_watcher, change) { log << [ :at_save, change.record_id ] }, inline: true, at: :save)
+      persuasion.update!(title: "Persuasion: A Novel")
+
+      expect(log).to eq([ [ :at_save, persuasion.id ], [ :start, persuasion.id ], [ :at_save, emma.id ], [ :finish, persuasion.id ], *in_turn.last(2) ])
+    end
+
+    it "runs an inline, at: :commit trigger on a queued callback's save after the job's callbacks" do
+      Author.watches(association: :books, callback: retitling_emma)
+      Author.watches(association: :books, callback: ->(_watcher, change) { log << [ :inline, change.record_id ] }, inline: true)
+      persuasion.update!(title: "Persuasion: A Novel")
+
+      perform_enqueued_jobs
+
+      expect(log).to eq([ [ :inline, persuasion.id ], *in_turn.first(2), [ :inline, emma.id ] ])
+    end
+
+    it "runs the changes callbacks make level by level, each after the changes made before it" do
+      middlemarch = Book.create!(author: author, title: "Middlemarch")
+      daniel_deronda = Book.create!(author: author, title: "Daniel Deronda")
+      saves = { persuasion.id => [ emma, middlemarch ], emma.id => [ daniel_deronda ] }
+      Author.watches(association: :books, callback: lambda { |_watcher, change|
+        log << change.record_id
+        saves.fetch(change.record_id, []).each { |book| book.update!(title: "#{book.title}: A Novel") }
+      }, inline: true)
+      persuasion.update!(title: "Persuasion: A Novel")
+
+      expect(log).to eq([ persuasion.id, emma.id, middlemarch.id, daniel_deronda.id ])
+    end
+
+    it "runs the triggers on a callback's save when that callback then raises, and raises its error" do
+      Author.watches(association: :books, callback: lambda { |_watcher, change|
+        log << change.record_id
+        emma.update!(title: "Emma: A Novel") if change.record_id == persuasion.id
+        raise "callback failed" if change.record_id == persuasion.id
+      }, inline: true)
+
+      expect { persuasion.update!(title: "Persuasion: A Novel") }.to raise_error("callback failed")
+      expect(log).to eq([ persuasion.id, emma.id ])
+    end
+
+    it "runs every waiting run when an earlier one raises, and raises the first error" do
+      middlemarch = Book.create!(author: author, title: "Middlemarch")
+      daniel_deronda = Book.create!(author: author, title: "Daniel Deronda")
+      Author.watches(association: :books, callback: lambda { |_watcher, change|
+        log << change.record_id
+        [ emma, middlemarch, daniel_deronda ].each { |book| book.update!(title: "#{book.title}: A Novel") } if change.record_id == persuasion.id
+        raise "#{change.record_id} failed" if [ emma.id, middlemarch.id ].include?(change.record_id)
+      }, inline: true)
+
+      expect { persuasion.update!(title: "Persuasion: A Novel") }.to raise_error("#{emma.id} failed")
+      expect(log).to eq([ persuasion.id, emma.id, middlemarch.id, daniel_deronda.id ])
+    end
+
+    it "queues a commit's queued triggers when an inline callback on it raises" do
+      Author.watches(association: :books, callback: ->(*) { raise "callback failed" }, inline: true)
+      Author.watches(association: :books, callback: :reindex!)
+
+      expect do
+        expect { persuasion.update!(title: "Persuasion: A Novel") }.to raise_error("callback failed")
+      end.to have_enqueued_job(Watchtower::Job).exactly(:once)
+    end
+
+    it "queues a commit's queued triggers when the inline triggers on a callback's save raise" do
+      Author.watches(association: :books, callback: lambda { |_watcher, change|
+        emma.update!(title: "Emma: A Novel") if change.record_id == persuasion.id
+        raise "callback failed" if change.record_id == emma.id
+      }, inline: true)
+      Author.watches(association: :books, callback: :reindex!)
+
+      expect do
+        expect { persuasion.update!(title: "Persuasion: A Novel") }.to raise_error("callback failed")
+      end.to have_enqueued_job(Watchtower::Job).exactly(:twice)
+    end
+
+    it "runs a save's inline triggers before the save returns after a callback's save raised in its triggers" do
+      Author.watches(association: :books, callback: lambda { |_watcher, change|
+        log << change.record_id
+        emma.update!(title: "Emma: A Novel") if change.record_id == persuasion.id
+        raise "callback failed" if change.record_id == emma.id
+      }, inline: true)
+      expect { persuasion.update!(title: "Persuasion: A Novel") }.to raise_error("callback failed")
+
+      middlemarch = Book.create!(author: author, title: "Middlemarch")
+
+      expect(log).to eq([ persuasion.id, emma.id, middlemarch.id ])
+    end
+
+    # Persuasion and Emma are retitled together, and the callback for Persuasion's change moves Emma to Grace through
+    # her callbacks.
+    {
+      "inline" => { inline: true },
+      "inline, with an around: that opens a transaction" => { inline: true, around: ->(&callbacks) { Book.transaction { callbacks.call } } },
+      "queued" => {}
+    }.each do |mode, options|
+      it "describes a callback's move after the changes of the run that made it, #{mode}" do
+        seen = []
+        Author.watches(association: :books, callback: lambda { |watcher, change|
+          seen << [ watcher.name, change.record_id, change.kind ]
+          Book.find(emma.id).update!(author: other_author) if change.record_id == persuasion.id
+        }, **options)
+
+        Book.transaction do
+          persuasion.update!(title: "Persuasion: A Novel")
+          emma.update!(title: "Emma: A Novel")
+        end
+        perform_enqueued_jobs
+        perform_enqueued_jobs
+
+        expect(seen).to eq([ [ "Ada", persuasion.id, :changed ], [ "Ada", emma.id, :changed ], [ "Ada", emma.id, :removed ], [ "Grace", emma.id, :added ] ])
+      end
+    end
+
+    it "runs an inline trigger on that save after the group's callbacks when around: opens a transaction" do
+      Author.watches(association: :books, callback: retitling_emma, inline: true, around: ->(&callbacks) { Book.transaction { callbacks.call } })
+      persuasion.update!(title: "Persuasion: A Novel")
+
+      expect(log).to eq(in_turn)
+    end
+
+    [ :commit, :save ].each do |at|
+      it "runs a queued, at: :#{at} trigger on that save in a job of its own, after the job that made it" do
+        Author.watches(association: :books, callback: retitling_emma, at: at)
+        persuasion.update!(title: "Persuasion: A Novel")
+
+        perform_enqueued_jobs
+        perform_enqueued_jobs
+
+        expect([ log, performed_jobs.count { |job| job["job_class"] == "Watchtower::Job" } ]).to eq([ in_turn, 2 ])
+      end
+    end
+  end
+
+  context "with a commit that changes several associated records" do
+    let!(:persuasion) { Book.create!(author: author, title: "Persuasion") }
+    let!(:emma) { Book.create!(author: author, title: "Emma") }
+    let!(:middlemarch) { Book.create!(author: other_author, title: "Middlemarch") }
+
+    def retitle_all
+      Book.transaction do
+        persuasion.update!(title: "Persuasion: A Novel")
+        emma.update!(title: "Emma: A Novel")
+        middlemarch.update!(title: "Middlemarch: A Study")
+      end
+    end
+
+    it "runs a queued callback once per watcher, in one job" do
+      Author.watches(association: :books, callback: :reindex!)
+      clear_enqueued_jobs
+
+      expect { retitle_all }.to have_enqueued_job(Watchtower::Job).exactly(:once)
+      expect { perform_enqueued_jobs }.to reindex(author, other_author)
+    end
+
+    it "runs an inline callback once per watcher" do
+      Author.watches(association: :books, callback: :reindex!, inline: true)
+
+      expect { retitle_all }.to reindex(author, other_author)
+    end
+
+    it "finds the watchers of every change together, reading their ids and then loading them" do
+      Author.watches(association: :books, callback: :reindex!, inline: true)
+      authors_read = 0
+      counter = ->(*, payload) { authors_read += 1 if payload[:sql].start_with?("SELECT") && payload[:sql].include?('"authors"') }
+
+      ActiveSupport::Notifications.subscribed(counter, "sql.active_record") { retitle_all }
+
+      expect(authors_read).to eq(2)
+    end
+
+    it "gives a callback that wants the change each change that reaches the watcher" do
+      seen = []
+      Author.watches(association: :books, callback: ->(watcher, change) { seen << [ watcher.name, change.record_id ] }, inline: true)
+
+      retitle_all
+
+      expect(seen).to contain_exactly([ "Ada", persuasion.id ], [ "Ada", emma.id ], [ "Grace", middlemarch.id ])
+    end
+
+    # Wraps `callback` so that, run for Persuasion's change, it also moves Emma to Grace without callbacks, after
+    # Emma's change was made and before its callbacks run.
+    def retitle_moving_emma_from(callback)
+      lambda do |watcher, change|
+        callback.call(watcher, change)
+        Book.where(id: emma.id).update_all(author_id: other_author.id) if change.record_id == persuasion.id
+      end
+    end
+
+    # Retitles Persuasion and Emma in one commit.
+    def retitle_persuasion_and_emma
+      Book.transaction do
+        persuasion.update!(title: "Persuasion: A Novel")
+        emma.update!(title: "Emma: A Novel")
+      end
+    end
+
+    it "describes every change as the database stood when the callbacks began" do
+      seen = []
+      Author.watches(association: :books, callback: retitle_moving_emma_from(->(watcher, change) { seen << [ watcher.name, change.kind ] }), inline: true)
+
+      retitle_persuasion_and_emma
+
+      expect(seen).to eq([ [ "Ada", :changed ], [ "Ada", :changed ] ])
+    end
+
+    it "gives an inline callback the instance that was saved as the change's record" do
+      records = []
+      Author.watches(association: :books, callback: ->(_watcher, change) { records << change.record }, inline: true)
+
+      persuasion.update!(title: "Persuasion: A Novel")
+
+      expect(records).to contain_exactly(be(persuasion))
+    end
+
+    it "runs an affects: callback on the watchers its scope selected when the callbacks began" do
+      seen = []
+      callback = lambda do |watcher, change|
+        seen << [ watcher.name, change.watchers.map(&:name) ]
+        emma.update_columns(author_id: other_author.id) if change.record_id == persuasion.id
+      end
+      Author.watches(class: "Book", affects: ->(book) { Author.where(id: book.author_id) }, callback: callback, inline: true)
+
+      retitle_persuasion_and_emma
+
+      expect(seen).to eq([ [ "Ada", [ "Ada" ] ], [ "Ada", [ "Ada" ] ] ])
+    end
+
+    it "gives a queued callback each record as it stood when the job began" do
+      seen = []
+      Author.watches(association: :books, callback: retitle_moving_emma_from(->(watcher, change) { seen << [ watcher.name, change.record.author_id ] }))
+
+      retitle_persuasion_and_emma
+      perform_enqueued_jobs
+
+      expect(seen).to eq([ [ "Ada", author.id ], [ "Ada", author.id ] ])
+    end
+
+    it "wraps all of the commit's callbacks in one around: block" do
+      calls = []
+      wrap = lambda do |&run|
+        calls << :open
+        run.call
+        calls << :close
+      end
+      Author.watches(association: :books, callback: ->(watcher) { calls << watcher.name }, inline: true, around: wrap)
+
+      retitle_all
+
+      expect(calls).to match([ :open, "Ada", "Grace", :close ]).or match([ :open, "Grace", "Ada", :close ])
+    end
+
+    it "runs only on the watchers of the changes that enabled the trigger" do
+      enabled = true
+      Author.watches(association: :books, callback: :reindex!, enabled: -> { enabled })
+      clear_enqueued_jobs
+
+      Book.transaction do
+        persuasion.update!(title: "Persuasion: A Novel")
+        enabled = false
+        middlemarch.update!(title: "Middlemarch: A Study")
+        enabled = true
+      end
+
+      expect { perform_enqueued_jobs }.to reindex(author).and not_reindex(other_author)
     end
   end
 end

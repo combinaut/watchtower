@@ -32,6 +32,11 @@ RSpec.describe Watchtower::Job do
         .to change { author.reload.reindex_count }.by(1)
     end
 
+    it "fires the triggers for an `at` given as a string" do
+      Author.watches(association: :books, callback: :reindex!)
+      expect { perform(book, at: "commit") }.to change { author.reload.reindex_count }.by(1)
+    end
+
     it "supports a proc callback invoked with the watcher" do
       Author.watches(association: :books, callback: ->(watcher) { watcher.reindex! })
       expect { perform(book) }.to change { author.reload.reindex_count }.by(1)
